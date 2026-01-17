@@ -509,22 +509,80 @@ END:VCALENDAR`;
         concerns: '',
       });
       const [adviceType, setAdviceType] = useState('balanced');
+      const [lastSaved, setLastSaved] = useState(null);
 
+      // 起動時の自動ロード
       useEffect(() => {
         // ユーザーリスト読み込み
         const savedUsers = localStorage.getItem('portfolio_users');
         if (savedUsers) {
           setUsers(JSON.parse(savedUsers));
         }
-        const savedCurrentUser = localStorage.getItem('portfolio_current_user');
-        if (savedCurrentUser) {
-          setCurrentUser(savedCurrentUser);
-        }
+        const savedCurrentUser = localStorage.getItem('portfolio_current_user') || 'default';
+        setCurrentUser(savedCurrentUser);
         
         // プロファイル読み込み（ユーザーごと）
-        const savedProfile = localStorage.getItem(`investor_profile_${savedCurrentUser || 'default'}`);
+        const savedProfile = localStorage.getItem(`investor_profile_${savedCurrentUser}`);
         if (savedProfile) setProfile(JSON.parse(savedProfile));
+        
+        // 最新データを自動ロード
+        loadUserData(savedCurrentUser);
       }, []);
+      
+      // ユーザーのデータをlocalStorageから読み込む
+      const loadUserData = (userName) => {
+        const savedData = localStorage.getItem(`portfolio_data_${userName}`);
+        if (savedData) {
+          try {
+            const data = JSON.parse(savedData);
+            if (data.usStocks) setUSStocks(data.usStocks);
+            if (data.jpStocks) setJPStocks(data.jpStocks);
+            if (data.funds) setFunds(data.funds);
+            if (data.exchangeRate) setExchangeRate(data.exchangeRate);
+            if (data.history) setHistory(data.history);
+            if (data.lastSaved) setLastSaved(data.lastSaved);
+            setLoadedFiles(['自動復元']);
+            setViewMode('history');
+            setSelectedHistoryDate(data.lastSaved?.split('T')[0] || null);
+          } catch (e) {
+            console.error('Failed to load saved data:', e);
+          }
+        }
+      };
+      
+      // データを自動保存（CSV読み込み後に呼ばれる）
+      const autoSaveData = (newUSStocks, newJPStocks, newFunds, newExchangeRate) => {
+        const totalUS = newUSStocks.reduce((sum, s) => sum + s.value, 0);
+        const totalJP = newJPStocks.reduce((sum, s) => sum + s.value, 0);
+        const totalFundsVal = newFunds.reduce((sum, f) => sum + f.value, 0);
+        const totalValueJPY = (totalUS * newExchangeRate) + totalJP + totalFundsVal;
+        
+        const now = new Date().toISOString();
+        const today = now.split('T')[0];
+        
+        // 履歴に追加
+        const historyEntry = { date: today, totalValueJPY, exchangeRate: newExchangeRate };
+        const currentHistory = JSON.parse(localStorage.getItem(`portfolio_data_${currentUser}`) || '{}').history || [];
+        const newHistory = [...currentHistory.filter(h => h.date !== today), historyEntry]
+          .sort((a, b) => a.date.localeCompare(b.date))
+          .slice(-365);
+        
+        // localStorageに保存
+        const saveData = {
+          version: '5.0.0',
+          user: currentUser,
+          lastSaved: now,
+          exchangeRate: newExchangeRate,
+          usStocks: newUSStocks,
+          jpStocks: newJPStocks,
+          funds: newFunds,
+          history: newHistory
+        };
+        localStorage.setItem(`portfolio_data_${currentUser}`, JSON.stringify(saveData));
+        
+        setHistory(newHistory);
+        setLastSaved(now);
+      };
       
       // ユーザー変更時の処理
       const switchUser = (userName) => {
@@ -537,13 +595,14 @@ END:VCALENDAR`;
         } else {
           setProfile({ age: '', purpose: '老後資金', riskTolerance: '中', concerns: '' });
         }
-        // 履歴をクリア（新しい履歴をインポートしてもらう）
-        setHistory([]);
-        // CSVデータもクリア
+        // そのユーザーのデータを読み込み
         setUSStocks([]);
         setJPStocks([]);
         setFunds([]);
+        setHistory([]);
         setLoadedFiles([]);
+        setLastSaved(null);
+        loadUserData(userName);
       };
       
       // 新規ユーザー追加
@@ -581,31 +640,29 @@ END:VCALENDAR`;
         alert('プロファイルを保存しました！');
       };
       
-      // 今日のデータをJSONファイルとして保存
-      const saveDataToFile = () => {
+      // バックアップ用JSONファイルをダウンロード
+      const downloadBackup = () => {
         const totalUS = usStocks.reduce((sum, s) => sum + s.value, 0);
         const totalJP = jpStocks.reduce((sum, s) => sum + s.value, 0);
-        const totalFunds = funds.reduce((sum, f) => sum + f.value, 0);
-        const totalValueJPY = (totalUS * exchangeRate) + totalJP + totalFunds;
+        const totalFundsVal = funds.reduce((sum, f) => sum + f.value, 0);
+        const totalValueJPY = (totalUS * exchangeRate) + totalJP + totalFundsVal;
         
         if (totalValueJPY === 0) {
-          alert('保存するデータがありません。先にCSVを読み込んでください。');
+          alert('バックアップするデータがありません。');
           return;
         }
         
         const today = new Date().toISOString().split('T')[0];
         const data = {
-          version: '4.0.0',
+          version: '5.0.0',
+          type: 'backup',
           user: currentUser,
-          date: today,
-          savedAt: new Date().toISOString(),
+          exportedAt: new Date().toISOString(),
           exchangeRate: exchangeRate,
-          totalValueJPY: totalValueJPY,
-          breakdown: {
-            usStocks: { total: totalUS, totalJPY: totalUS * exchangeRate, items: usStocks },
-            jpStocks: { total: totalJP, items: jpStocks },
-            funds: { total: totalFunds, items: funds }
-          },
+          usStocks: usStocks,
+          jpStocks: jpStocks,
+          funds: funds,
+          history: history,
           profile: profile
         };
         
@@ -613,20 +670,15 @@ END:VCALENDAR`;
         const url = URL.createObjectURL(blob);
         const a = document.createElement('a');
         a.href = url;
-        a.download = `portfolio-${currentUser}-${today}.json`;
+        a.download = `portfolio-backup-${currentUser}-${today}.json`;
         a.click();
         URL.revokeObjectURL(url);
         
-        // 履歴にも追加
-        const historyEntry = { date: today, totalValueJPY, exchangeRate };
-        const newHistory = [...history.filter(h => h.date !== today), historyEntry].sort((a, b) => a.date.localeCompare(b.date));
-        setHistory(newHistory);
-        
-        alert(`ファイルをダウンロードしました！\n保存先を選んで管理してください。`);
+        alert(`バックアップをダウンロードしました！\n任意のフォルダに保存して管理してください。`);
       };
       
-      // 履歴ファイル（複数可）を読み込み
-      const loadHistoryFiles = (files) => {
+      // バックアップファイルをインポート（PC移行など）
+      const importBackup = (files) => {
         const fileArray = Array.from(files);
         let loadedCount = 0;
         let newHistory = [...history];
@@ -638,22 +690,38 @@ END:VCALENDAR`;
             try {
               const data = JSON.parse(event.target.result);
               
-              // v4形式のファイルの場合
-              if (data.version && data.date && data.totalValueJPY) {
+              // v5形式のバックアップ
+              if (data.version === '5.0.0' && data.usStocks) {
+                if (!latestData || (data.exportedAt && data.exportedAt > latestData.exportedAt)) {
+                  latestData = data;
+                }
+                if (data.history) {
+                  data.history.forEach(h => {
+                    newHistory = [...newHistory.filter(e => e.date !== h.date), h];
+                  });
+                }
+              }
+              // v4形式のファイル
+              else if (data.version && data.date && data.breakdown) {
+                const totalValueJPY = data.totalValueJPY || 0;
                 const entry = {
                   date: data.date,
-                  totalValueJPY: data.totalValueJPY,
-                  exchangeRate: data.exchangeRate || 158,
-                  breakdown: data.breakdown
+                  totalValueJPY: totalValueJPY,
+                  exchangeRate: data.exchangeRate || 158
                 };
                 newHistory = [...newHistory.filter(h => h.date !== entry.date), entry];
                 
-                // 最新のデータを保持
-                if (!latestData || data.date > latestData.date) {
-                  latestData = data;
+                if (!latestData || data.date > (latestData.date || '')) {
+                  latestData = {
+                    usStocks: data.breakdown?.usStocks?.items || [],
+                    jpStocks: data.breakdown?.jpStocks?.items || [],
+                    funds: data.breakdown?.funds?.items || [],
+                    exchangeRate: data.exchangeRate || 158,
+                    exportedAt: data.savedAt
+                  };
                 }
               }
-              // 旧形式（historyが配列）の場合
+              // 旧形式（historyが配列）
               else if (data.history && Array.isArray(data.history)) {
                 data.history.forEach(h => {
                   newHistory = [...newHistory.filter(e => e.date !== h.date), h];
@@ -668,27 +736,34 @@ END:VCALENDAR`;
                 setHistory(newHistory);
                 
                 // 最新のデータがあれば表示用にセット
-                if (latestData && latestData.breakdown) {
-                  if (latestData.breakdown.usStocks?.items) {
-                    setUSStocks(latestData.breakdown.usStocks.items);
-                  }
-                  if (latestData.breakdown.jpStocks?.items) {
-                    setJPStocks(latestData.breakdown.jpStocks.items);
-                  }
-                  if (latestData.breakdown.funds?.items) {
-                    setFunds(latestData.breakdown.funds.items);
-                  }
-                  if (latestData.exchangeRate) {
-                    setExchangeRate(latestData.exchangeRate);
-                  }
+                if (latestData) {
+                  if (latestData.usStocks) setUSStocks(latestData.usStocks);
+                  if (latestData.jpStocks) setJPStocks(latestData.jpStocks);
+                  if (latestData.funds) setFunds(latestData.funds);
+                  if (latestData.exchangeRate) setExchangeRate(latestData.exchangeRate);
+                  if (latestData.profile) setProfile(latestData.profile);
                   setViewMode('history');
-                  setSelectedHistoryDate(latestData.date);
+                  setLoadedFiles(['インポート']);
                 }
                 
-                alert(`${loadedCount}件のファイルから履歴を読み込みました`);
+                // localStorageにも保存
+                const saveData = {
+                  version: '5.0.0',
+                  user: currentUser,
+                  lastSaved: new Date().toISOString(),
+                  exchangeRate: latestData?.exchangeRate || exchangeRate,
+                  usStocks: latestData?.usStocks || usStocks,
+                  jpStocks: latestData?.jpStocks || jpStocks,
+                  funds: latestData?.funds || funds,
+                  history: newHistory
+                };
+                localStorage.setItem(`portfolio_data_${currentUser}`, JSON.stringify(saveData));
+                
+                alert(`${loadedCount}件のファイルをインポートしました`);
               }
             } catch (err) {
               console.error('Failed to parse file:', file.name, err);
+              alert(`ファイルの読み込みに失敗しました: ${file.name}`);
             }
           };
           reader.readAsText(file);
@@ -826,6 +901,16 @@ ${adviceRequest}
       const totalJPValue = jpStocks.reduce((sum, s) => sum + s.value, 0);
       const totalFundValue = funds.reduce((sum, s) => sum + s.value, 0);
       const totalValueJPY = totalUSValueJPY + totalJPValue + totalFundValue;
+
+      // CSV読み込み後の自動保存
+      useEffect(() => {
+        // CSVから読み込んだ場合のみ自動保存（自動復元やインポートは除く）
+        const isCSVLoaded = loadedFiles.some(f => ['米国株', '日本株', '投資信託'].includes(f));
+        if (isCSVLoaded && hasData) {
+          autoSaveData(usStocks, jpStocks, funds, exchangeRate);
+          setViewMode('csv');
+        }
+      }, [loadedFiles]);
 
       const handleFile = useCallback((file) => {
         console.log('=== handleFile ===');
@@ -1019,21 +1104,21 @@ ${adviceRequest}
                 )}
               </div>
               
-              {/* JSON読み込みエリア */}
+              {/* バックアップ復元エリア */}
               {!hasData && (
                 <div className="mt-4 text-center">
                   <p className="text-slate-500 text-sm mb-2">または</p>
                   <label className="inline-flex items-center gap-2 px-4 py-2 bg-white border border-slate-300 rounded-lg text-sm text-slate-600 hover:bg-slate-50 hover:border-slate-400 cursor-pointer transition-all">
-                    📂 保存済みデータを読み込む
+                    📂 バックアップから復元
                     <input
                       type="file"
                       accept=".json"
                       multiple
                       className="hidden"
-                      onChange={(e) => loadHistoryFiles(e.target.files)}
+                      onChange={(e) => importBackup(e.target.files)}
                     />
                   </label>
-                  <p className="text-xs text-slate-400 mt-2">以前保存したJSONファイルを選択（複数可）</p>
+                  <p className="text-xs text-slate-400 mt-2">別のPC・ブラウザから移行する場合に使用</p>
                 </div>
               )}
             </div>
@@ -1218,52 +1303,64 @@ ${adviceRequest}
                 {/* 保有一覧タブ */}
                 {activeTab === 'holdings' && (
                   <div className="space-y-6">
-                    {/* データ管理セクション */}
-                    <div className="bg-gradient-to-r from-blue-50 to-indigo-50 rounded-2xl p-6 border border-blue-100">
+                    {/* 自動保存ステータス */}
+                    <div className="bg-gradient-to-r from-green-50 to-emerald-50 rounded-2xl p-6 border border-green-100">
+                      <div className="flex items-start justify-between gap-4 flex-wrap">
+                        <div>
+                          <h3 className="font-bold text-slate-800 flex items-center gap-2">
+                            <span className="text-2xl">✅</span> 自動保存
+                          </h3>
+                          <p className="text-sm text-slate-600 mt-1">CSVを読み込むと自動でブラウザに保存されます</p>
+                          {lastSaved && (
+                            <p className="text-xs text-green-600 mt-2">
+                              最終保存: {new Date(lastSaved).toLocaleString('ja-JP')}
+                            </p>
+                          )}
+                          {history.length > 0 && (
+                            <p className="text-xs text-slate-500 mt-1">📊 {history.length}日分の履歴あり</p>
+                          )}
+                        </div>
+                        <div className="text-4xl">💾</div>
+                      </div>
+                    </div>
+                    
+                    {/* バックアップ */}
+                    <div className="bg-gradient-to-r from-amber-50 to-orange-50 rounded-2xl p-6 border border-amber-100">
                       <h3 className="font-bold text-slate-800 flex items-center gap-2 mb-4">
-                        <span className="text-2xl">💾</span> データ管理
+                        <span className="text-2xl">📦</span> バックアップ・復元
                       </h3>
+                      <p className="text-sm text-slate-600 mb-4">PC移行やブラウザ変更時のバックアップ用</p>
                       
                       <div className="grid md:grid-cols-2 gap-4">
-                        {/* 保存 */}
+                        {/* バックアップダウンロード */}
                         <div className="bg-white rounded-xl p-4 border border-slate-200">
-                          <h4 className="font-medium text-slate-700 mb-2">📥 今日のデータを保存</h4>
-                          <p className="text-xs text-slate-500 mb-3">CSVを読み込んだ後、JSONファイルとして保存できます</p>
+                          <h4 className="font-medium text-slate-700 mb-2">📥 バックアップ</h4>
+                          <p className="text-xs text-slate-500 mb-3">全データをJSONファイルとしてダウンロード</p>
                           <button
-                            onClick={saveDataToFile}
+                            onClick={downloadBackup}
                             disabled={!hasData}
-                            className={`w-full flex items-center justify-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-all ${hasData ? 'bg-gradient-to-r from-blue-600 to-indigo-600 text-white hover:from-blue-700 hover:to-indigo-700 shadow-lg shadow-blue-500/25' : 'bg-slate-200 text-slate-400 cursor-not-allowed'}`}
+                            className={`w-full flex items-center justify-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-all ${hasData ? 'bg-gradient-to-r from-amber-500 to-orange-500 text-white hover:from-amber-600 hover:to-orange-600 shadow-lg shadow-amber-500/25' : 'bg-slate-200 text-slate-400 cursor-not-allowed'}`}
                           >
-                            💾 保存してダウンロード
+                            📥 ダウンロード
                           </button>
                         </div>
                         
-                        {/* 読み込み */}
+                        {/* インポート */}
                         <div className="bg-white rounded-xl p-4 border border-slate-200">
-                          <h4 className="font-medium text-slate-700 mb-2">📂 過去のデータを読み込み</h4>
-                          <p className="text-xs text-slate-500 mb-3">保存したJSONファイルを選択（複数可）</p>
-                          <label className="w-full flex items-center justify-center gap-2 px-4 py-2 rounded-lg text-sm font-medium bg-white border-2 border-dashed border-slate-300 hover:border-blue-400 hover:bg-blue-50 text-slate-600 cursor-pointer transition-all">
+                          <h4 className="font-medium text-slate-700 mb-2">📤 復元</h4>
+                          <p className="text-xs text-slate-500 mb-3">バックアップファイルから復元</p>
+                          <label className="w-full flex items-center justify-center gap-2 px-4 py-2 rounded-lg text-sm font-medium bg-white border-2 border-dashed border-amber-300 hover:border-amber-400 hover:bg-amber-50 text-amber-700 cursor-pointer transition-all">
                             📁 ファイルを選択
                             <input
                               type="file"
                               accept=".json"
                               multiple
                               className="hidden"
-                              onChange={(e) => loadHistoryFiles(e.target.files)}
+                              onChange={(e) => importBackup(e.target.files)}
                             />
                           </label>
                         </div>
                       </div>
-                      
-                      {/* 履歴情報 */}
-                      {history.length > 0 && (
-                        <div className="mt-4 pt-4 border-t border-blue-200">
-                          <p className="text-sm text-slate-600">📊 {history.length}日分の履歴があります</p>
-                          {viewMode === 'history' && selectedHistoryDate && (
-                            <p className="text-xs text-blue-600 mt-1">📅 {selectedHistoryDate} のデータを表示中</p>
-                          )}
-                        </div>
-                      )}
                     </div>
 
                     {usStocks.length > 0 && (
@@ -1434,10 +1531,13 @@ ${adviceRequest}
                   <li className="flex gap-3"><span className="flex-shrink-0 w-6 h-6 bg-blue-100 text-blue-600 rounded-full flex items-center justify-center text-xs font-bold">1</span><span>楽天証券にログイン → 「保有商品一覧」を開く</span></li>
                   <li className="flex gap-3"><span className="flex-shrink-0 w-6 h-6 bg-blue-100 text-blue-600 rounded-full flex items-center justify-center text-xs font-bold">2</span><span>「米国株式」「日本株式」「投資信託」それぞれで「CSV保存」</span></li>
                   <li className="flex gap-3"><span className="flex-shrink-0 w-6 h-6 bg-blue-100 text-blue-600 rounded-full flex items-center justify-center text-xs font-bold">3</span><span>ダウンロードしたCSVをまとめて上のエリアにドラッグ&ドロップ</span></li>
-                  <li className="flex gap-3"><span className="flex-shrink-0 w-6 h-6 bg-blue-100 text-blue-600 rounded-full flex items-center justify-center text-xs font-bold">4</span><span>「決算カレンダー」ボタンで.icsをダウンロード → Googleカレンダーにインポート</span></li>
+                  <li className="flex gap-3"><span className="flex-shrink-0 w-6 h-6 bg-blue-100 text-blue-600 rounded-full flex items-center justify-center text-xs font-bold">4</span><span>次回アクセス時は自動でデータが復元されます</span></li>
                 </ol>
-                <div className="mt-6 p-4 bg-amber-50 rounded-lg">
-                  <p className="text-sm text-amber-700">💡 <strong>定期的に「履歴保存」</strong>すると、資産の推移グラフが見られるようになります！</p>
+                <div className="mt-6 p-4 bg-green-50 rounded-lg">
+                  <p className="text-sm text-green-700">✅ <strong>自動保存</strong>：CSV読み込み後、自動でブラウザに保存されます。次回アクセス時に自動復元！</p>
+                </div>
+                <div className="mt-3 p-4 bg-amber-50 rounded-lg">
+                  <p className="text-sm text-amber-700">💡 <strong>バックアップ</strong>：「保有一覧」タブからバックアップをダウンロードできます（PC移行時などに便利）</p>
                 </div>
               </div>
             )}
@@ -1445,7 +1545,7 @@ ${adviceRequest}
 
           <footer className="bg-white border-t border-slate-200 mt-8">
             <div className="max-w-6xl mx-auto px-4 py-4 text-center text-xs text-slate-500">
-              <p>楽天証券対応 資産管理＆決算カレンダー v4.0.0</p>
+              <p>楽天証券対応 資産管理＆決算カレンダー v5.0.0</p>
               <p className="mt-1">🔒 すべてのデータはブラウザ内で処理されます（サーバー送信なし）</p>
             </div>
           </footer>
