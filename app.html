@@ -1018,6 +1018,24 @@ ${adviceRequest}
                   </div>
                 )}
               </div>
+              
+              {/* JSON読み込みエリア */}
+              {!hasData && (
+                <div className="mt-4 text-center">
+                  <p className="text-slate-500 text-sm mb-2">または</p>
+                  <label className="inline-flex items-center gap-2 px-4 py-2 bg-white border border-slate-300 rounded-lg text-sm text-slate-600 hover:bg-slate-50 hover:border-slate-400 cursor-pointer transition-all">
+                    📂 保存済みデータを読み込む
+                    <input
+                      type="file"
+                      accept=".json"
+                      multiple
+                      className="hidden"
+                      onChange={(e) => loadHistoryFiles(e.target.files)}
+                    />
+                  </label>
+                  <p className="text-xs text-slate-400 mt-2">以前保存したJSONファイルを選択（複数可）</p>
+                </div>
+              )}
             </div>
 
             {hasData && (
