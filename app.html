@@ -46,21 +46,47 @@
     async function fetchEarningsFromAPI(symbols) {
       if (!symbols || symbols.length === 0) return {};
       
-      try {
-        const symbolStr = symbols.join(',');
-        const response = await fetch(`/api/earnings?symbols=${encodeURIComponent(symbolStr)}`);
-        
-        if (!response.ok) {
-          console.warn('Earnings API returned error:', response.status);
-          return {};
+      const results = {};
+      
+      // 各シンボルごとにAPIを呼び出し
+      const promises = symbols.map(async (symbol) => {
+        try {
+          const response = await fetch(`/api/earnings?symbol=${encodeURIComponent(symbol)}`);
+          
+          if (!response.ok) {
+            console.warn(`Earnings API error for ${symbol}:`, response.status);
+            return { symbol, data: null };
+          }
+          
+          const data = await response.json();
+          
+          if (data.date) {
+            return {
+              symbol,
+              data: {
+                nextEarnings: data.date,
+                time: data.hour === 'amc' ? 'AMC' : data.hour === 'bmo' ? 'BMO' : 'TBD',
+                epsEstimate: data.epsEstimate,
+                revenueEstimate: data.revenueEstimate
+              }
+            };
+          }
+          return { symbol, data: null };
+        } catch (error) {
+          console.warn(`Failed to fetch earnings for ${symbol}:`, error);
+          return { symbol, data: null };
         }
-        
-        const data = await response.json();
-        return data.earnings || {};
-      } catch (error) {
-        console.warn('Failed to fetch earnings from API:', error);
-        return {};
-      }
+      });
+      
+      const responses = await Promise.all(promises);
+      
+      responses.forEach(({ symbol, data }) => {
+        if (data) {
+          results[symbol] = data;
+        }
+      });
+      
+      return results;
     }
 
     // ========== ユーティリティ関数 ==========
@@ -1706,7 +1732,7 @@ ${adviceRequest}
 
           <footer className="bg-white border-t border-slate-200 mt-8">
             <div className="max-w-6xl mx-auto px-4 py-4 text-center text-xs text-slate-500">
-              <p>楽天証券対応 資産管理＆決算カレンダー v6.0.0</p>
+              <p>楽天証券対応 資産管理＆決算カレンダー v6.0.1</p>
               <p className="mt-1">🔒 すべてのデータはブラウザ内で処理されます（サーバー送信なし）</p>
             </div>
           </footer>
