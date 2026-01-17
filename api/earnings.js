@@ -1,3 +1,19 @@
+// メモリキャッシュ（1時間有効）
+const cache = new Map();
+const CACHE_TTL = 60 * 60 * 1000; // 1時間
+
+function getCached(symbol) {
+  const item = cache.get(symbol);
+  if (item && Date.now() - item.timestamp < CACHE_TTL) {
+    return item.data;
+  }
+  return null;
+}
+
+function setCache(symbol, data) {
+  cache.set(symbol, { data, timestamp: Date.now() });
+}
+
 module.exports = async (req, res) => {
   // CORS設定
   res.setHeader('Access-Control-Allow-Origin', '*');
@@ -16,6 +32,12 @@ module.exports = async (req, res) => {
 
   if (!symbol) {
     return res.status(400).json({ error: 'symbol parameter is required' });
+  }
+
+  // キャッシュをチェック
+  const cached = getCached(symbol);
+  if (cached) {
+    return res.status(200).json({ ...cached, cached: true });
   }
 
   const FINNHUB_API_KEY = process.env.FINNHUB_API_KEY;
@@ -40,28 +62,35 @@ module.exports = async (req, res) => {
 
     const data = await response.json();
 
+    let result;
+
     // 決算データを抽出
     if (data.earningsCalendar && data.earningsCalendar.length > 0) {
-      // 最も近い決算日を取得
       const sorted = data.earningsCalendar.sort((a, b) => a.date.localeCompare(b.date));
       const next = sorted[0];
       
-      return res.status(200).json({
+      result = {
         symbol: symbol,
         date: next.date,
-        hour: next.hour, // 'bmo' = before market open, 'amc' = after market close
+        hour: next.hour,
         epsEstimate: next.epsEstimate,
         revenueEstimate: next.revenueEstimate,
         year: next.year,
         quarter: next.quarter
-      });
+      };
     } else {
-      return res.status(200).json({
+      result = {
         symbol: symbol,
         date: null,
         message: 'No upcoming earnings found'
-      });
+      };
     }
+
+    // キャッシュに保存
+    setCache(symbol, result);
+
+    return res.status(200).json(result);
+
   } catch (error) {
     console.error('Error fetching earnings:', error);
     return res.status(500).json({ error: 'Failed to fetch earnings data', details: error.message });

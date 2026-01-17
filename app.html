@@ -42,14 +42,57 @@
       'TSLA': { name: 'テスラ', nextEarnings: '2026-01-29', time: 'AMC' },
     };
 
-    // 決算日をAPIから取得する関数
+    // 決算日キャッシュ（6時間有効）
+    const EARNINGS_CACHE_TTL = 6 * 60 * 60 * 1000; // 6時間
+    
+    function getEarningsCache(symbol) {
+      try {
+        const cached = localStorage.getItem(`earnings_${symbol}`);
+        if (cached) {
+          const { data, timestamp } = JSON.parse(cached);
+          if (Date.now() - timestamp < EARNINGS_CACHE_TTL) {
+            return data;
+          }
+        }
+      } catch (e) {}
+      return null;
+    }
+    
+    function setEarningsCache(symbol, data) {
+      try {
+        localStorage.setItem(`earnings_${symbol}`, JSON.stringify({
+          data,
+          timestamp: Date.now()
+        }));
+      } catch (e) {}
+    }
+
+    // 決算日をAPIから取得する関数（キャッシュ付き）
     async function fetchEarningsFromAPI(symbols) {
       if (!symbols || symbols.length === 0) return {};
       
       const results = {};
+      const symbolsToFetch = [];
       
-      // 各シンボルごとにAPIを呼び出し
-      const promises = symbols.map(async (symbol) => {
+      // まずキャッシュをチェック
+      symbols.forEach(symbol => {
+        const cached = getEarningsCache(symbol);
+        if (cached) {
+          results[symbol] = cached;
+          console.log(`Earnings cache hit: ${symbol}`);
+        } else {
+          symbolsToFetch.push(symbol);
+        }
+      });
+      
+      // キャッシュにない銘柄のみAPIを呼び出し
+      if (symbolsToFetch.length === 0) {
+        return results;
+      }
+      
+      console.log(`Fetching earnings from API: ${symbolsToFetch.join(', ')}`);
+      
+      const promises = symbolsToFetch.map(async (symbol) => {
         try {
           const response = await fetch(`/api/earnings?symbol=${encodeURIComponent(symbol)}`);
           
@@ -61,15 +104,15 @@
           const data = await response.json();
           
           if (data.date) {
-            return {
-              symbol,
-              data: {
-                nextEarnings: data.date,
-                time: data.hour === 'amc' ? 'AMC' : data.hour === 'bmo' ? 'BMO' : 'TBD',
-                epsEstimate: data.epsEstimate,
-                revenueEstimate: data.revenueEstimate
-              }
+            const earningsData = {
+              nextEarnings: data.date,
+              time: data.hour === 'amc' ? 'AMC' : data.hour === 'bmo' ? 'BMO' : 'TBD',
+              epsEstimate: data.epsEstimate,
+              revenueEstimate: data.revenueEstimate
             };
+            // キャッシュに保存
+            setEarningsCache(symbol, earningsData);
+            return { symbol, data: earningsData };
           }
           return { symbol, data: null };
         } catch (error) {
@@ -1732,7 +1775,7 @@ ${adviceRequest}
 
           <footer className="bg-white border-t border-slate-200 mt-8">
             <div className="max-w-6xl mx-auto px-4 py-4 text-center text-xs text-slate-500">
-              <p>楽天証券対応 資産管理＆決算カレンダー v6.0.1</p>
+              <p>楽天証券対応 資産管理＆決算カレンダー v6.1.0</p>
               <p className="mt-1">🔒 すべてのデータはブラウザ内で処理されます（サーバー送信なし）</p>
             </div>
           </footer>
