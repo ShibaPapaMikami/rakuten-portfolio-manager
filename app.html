@@ -66,8 +66,8 @@
         try {
           const decoder = new TextDecoder(encoding);
           const text = decoder.decode(buffer);
-          // 日本語が含まれているか確認
-          if (text.includes('■') || text.includes('ティッカー') || text.includes('銘柄') || text.includes('投資信託')) {
+          // 日本語が含まれているか確認（外貨CSV用に「通貨」「残高」も追加）
+          if (text.includes('■') || text.includes('ティッカー') || text.includes('銘柄') || text.includes('投資信託') || text.includes('通貨') || text.includes('残高')) {
             console.log('Successful decoding with:', encoding);
             return text;
           }
@@ -1630,7 +1630,7 @@ ${adviceRequest}
 
           <footer className="bg-white border-t border-slate-200 mt-8">
             <div className="max-w-6xl mx-auto px-4 py-4 text-center text-xs text-slate-500">
-              <p>楽天証券対応 資産管理＆決算カレンダー v5.1.1</p>
+              <p>楽天証券対応 資産管理＆決算カレンダー v5.1.2</p>
               <p className="mt-1">🔒 すべてのデータはブラウザ内で処理されます（サーバー送信なし）</p>
             </div>
           </footer>
