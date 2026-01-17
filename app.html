@@ -951,6 +951,72 @@ ${adviceRequest}
                 {/* 推移タブ */}
                 {activeTab === 'history' && (
                   <div className="space-y-6">
+                    {/* エクスポート/インポート */}
+                    <div className="bg-gradient-to-r from-emerald-50 to-teal-50 rounded-2xl p-6 border border-emerald-100">
+                      <div className="flex items-start justify-between gap-4 flex-wrap">
+                        <div>
+                          <h3 className="font-bold text-slate-800 flex items-center gap-2">
+                            <span className="text-2xl">💾</span> データのバックアップ
+                          </h3>
+                          <p className="text-sm text-slate-600 mt-1">履歴データをファイルに保存・復元できます</p>
+                        </div>
+                        <div className="flex gap-2">
+                          <button
+                            onClick={() => {
+                              const data = {
+                                version: '3.0.0',
+                                exportedAt: new Date().toISOString(),
+                                history: history,
+                                profile: profile
+                              };
+                              const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+                              const url = URL.createObjectURL(blob);
+                              const a = document.createElement('a');
+                              a.href = url;
+                              a.download = `portfolio-backup-${new Date().toISOString().split('T')[0]}.json`;
+                              a.click();
+                              URL.revokeObjectURL(url);
+                            }}
+                            className="flex items-center gap-2 bg-emerald-600 hover:bg-emerald-700 text-white px-4 py-2 rounded-lg text-sm font-medium transition-all"
+                          >
+                            📥 エクスポート
+                          </button>
+                          <label className="flex items-center gap-2 bg-white border border-emerald-300 hover:bg-emerald-50 text-emerald-700 px-4 py-2 rounded-lg text-sm font-medium transition-all cursor-pointer">
+                            📤 インポート
+                            <input
+                              type="file"
+                              accept=".json"
+                              className="hidden"
+                              onChange={(e) => {
+                                const file = e.target.files?.[0];
+                                if (!file) return;
+                                const reader = new FileReader();
+                                reader.onload = (event) => {
+                                  try {
+                                    const data = JSON.parse(event.target.result);
+                                    if (data.history) {
+                                      localStorage.setItem('portfolio_history', JSON.stringify(data.history));
+                                      setHistory(data.history);
+                                    }
+                                    if (data.profile) {
+                                      localStorage.setItem('investor_profile', JSON.stringify(data.profile));
+                                      setProfile(data.profile);
+                                    }
+                                    alert(`インポート完了！\n履歴: ${data.history?.length || 0}件\nプロファイル: ${data.profile ? '復元済み' : 'なし'}`);
+                                  } catch (err) {
+                                    alert('ファイルの読み込みに失敗しました');
+                                  }
+                                };
+                                reader.readAsText(file);
+                                e.target.value = '';
+                              }}
+                            />
+                          </label>
+                        </div>
+                      </div>
+                      <p className="text-xs text-slate-500 mt-3">💡 定期的にエクスポートしておくと、ブラウザのデータが消えても復元できます</p>
+                    </div>
+
                     <div className="bg-white rounded-2xl p-6 shadow-sm">
                       <h3 className="font-bold text-slate-800 mb-4">📈 資産推移（過去30日）</h3>
                       <SimpleLineChart data={chartData} />
