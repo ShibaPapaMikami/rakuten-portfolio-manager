@@ -25,9 +25,14 @@ module.exports = async (req, res) => {
   }
 
   try {
-    const response = await fetch(
-      `https://finnhub.io/api/v1/calendar/earnings?symbol=${symbol}&token=${FINNHUB_API_KEY}`
-    );
+    // 今日から90日後までの範囲で検索
+    const today = new Date();
+    const fromDate = today.toISOString().split('T')[0];
+    const toDate = new Date(today.getTime() + 90 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+
+    const url = `https://finnhub.io/api/v1/calendar/earnings?from=${fromDate}&to=${toDate}&symbol=${symbol}&token=${FINNHUB_API_KEY}`;
+    
+    const response = await fetch(url);
 
     if (!response.ok) {
       throw new Error(`Finnhub API error: ${response.status}`);
@@ -35,20 +40,20 @@ module.exports = async (req, res) => {
 
     const data = await response.json();
 
-    // 次回決算日を抽出（今日以降で最も近い日付）
-    const today = new Date().toISOString().split('T')[0];
-    const futureEarnings = (data.earningsCalendar || [])
-      .filter(e => e.date >= today)
-      .sort((a, b) => a.date.localeCompare(b.date));
-
-    if (futureEarnings.length > 0) {
-      const next = futureEarnings[0];
+    // 決算データを抽出
+    if (data.earningsCalendar && data.earningsCalendar.length > 0) {
+      // 最も近い決算日を取得
+      const sorted = data.earningsCalendar.sort((a, b) => a.date.localeCompare(b.date));
+      const next = sorted[0];
+      
       return res.status(200).json({
         symbol: symbol,
         date: next.date,
-        hour: next.hour,
+        hour: next.hour, // 'bmo' = before market open, 'amc' = after market close
         epsEstimate: next.epsEstimate,
-        revenueEstimate: next.revenueEstimate
+        revenueEstimate: next.revenueEstimate,
+        year: next.year,
+        quarter: next.quarter
       });
     } else {
       return res.status(200).json({
@@ -59,6 +64,6 @@ module.exports = async (req, res) => {
     }
   } catch (error) {
     console.error('Error fetching earnings:', error);
-    return res.status(500).json({ error: 'Failed to fetch earnings data' });
+    return res.status(500).json({ error: 'Failed to fetch earnings data', details: error.message });
   }
 };
