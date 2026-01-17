@@ -29,8 +29,10 @@
   <script type="text/babel">
     const { useState, useEffect, useCallback } = React;
 
-    // ========== 決算日データベース ==========
-    const US_EARNINGS = {
+    // ========== 決算日データ（APIから取得、フォールバック用に一部ハードコード） ==========
+    // 注: 決算日はFinnhub APIから自動取得されます
+    // APIが利用できない場合のフォールバックとして主要銘柄のみハードコード
+    const FALLBACK_EARNINGS = {
       'AAPL': { name: 'アップル', nextEarnings: '2026-01-30', time: 'AMC' },
       'MSFT': { name: 'マイクロソフト', nextEarnings: '2026-01-28', time: 'AMC' },
       'GOOGL': { name: 'アルファベット', nextEarnings: '2026-02-04', time: 'AMC' },
@@ -38,24 +40,28 @@
       'NVDA': { name: 'エヌビディア', nextEarnings: '2026-02-26', time: 'AMC' },
       'META': { name: 'メタ', nextEarnings: '2026-01-29', time: 'AMC' },
       'TSLA': { name: 'テスラ', nextEarnings: '2026-01-29', time: 'AMC' },
-      'NFLX': { name: 'ネットフリックス', nextEarnings: '2026-01-21', time: 'AMC' },
-      'LLY': { name: 'イーライリリー', nextEarnings: '2026-02-06', time: 'BMO' },
-      'V': { name: 'ビザ', nextEarnings: '2026-01-30', time: 'AMC' },
-      'TSM': { name: 'TSMC', nextEarnings: '2026-01-16', time: 'BMO' },
-      'PLTR': { name: 'パランティア', nextEarnings: '2026-02-03', time: 'AMC' },
-      'KO': { name: 'コカ・コーラ', nextEarnings: '2026-02-11', time: 'BMO' },
-      'SOFI': { name: 'ソーファイ', nextEarnings: '2026-01-27', time: 'AMC' },
-      'IONQ': { name: 'IonQ', nextEarnings: '2026-03-12', time: 'AMC' },
-      'BRK B': { name: 'バークシャー', nextEarnings: '2026-02-22', time: 'BMO' },
-      'ACHR': { name: 'アーチャー', nextEarnings: '2026-02-27', time: 'AMC' },
     };
 
-    const JP_EARNINGS = {
-      '1306': { name: 'TOPIX ETF', nextEarnings: null, time: null },
-      '1542': { name: '純銀上場信託', nextEarnings: null, time: null },
-      '1591': { name: 'JPX400 ETF', nextEarnings: null, time: null },
-      '8985': { name: 'ジャパン・ホテル・リート', nextEarnings: '2026-02-20', time: 'JP' },
-    };
+    // 決算日をAPIから取得する関数
+    async function fetchEarningsFromAPI(symbols) {
+      if (!symbols || symbols.length === 0) return {};
+      
+      try {
+        const symbolStr = symbols.join(',');
+        const response = await fetch(`/api/earnings?symbols=${encodeURIComponent(symbolStr)}`);
+        
+        if (!response.ok) {
+          console.warn('Earnings API returned error:', response.status);
+          return {};
+        }
+        
+        const data = await response.json();
+        return data.earnings || {};
+      } catch (error) {
+        console.warn('Failed to fetch earnings from API:', error);
+        return {};
+      }
+    }
 
     // ========== ユーティリティ関数 ==========
     function decodeShiftJIS(buffer) {
@@ -189,7 +195,7 @@
               stocks.push({
                 type: 'US', ticker, name, quantity, avgPrice, currentPrice,
                 dailyChange, monthlyChange: null, value, valueCurrency: 'USD',
-                gainPercent, section: currentSection, earnings: US_EARNINGS[ticker] || null
+                gainPercent, section: currentSection, earnings: null
               });
             }
           }
@@ -260,7 +266,7 @@
             stocks.push({
               type: 'JP', ticker: code, name, quantity, avgPrice, currentPrice,
               dailyChange: null, monthlyChange, value, valueCurrency: 'JPY',
-              gainPercent, section: currentSection, earnings: JP_EARNINGS[code] || null
+              gainPercent, section: currentSection, earnings: null
             });
           }
         }
@@ -535,6 +541,10 @@ END:VCALENDAR`;
       const [reminderDays, setReminderDays] = useState(3);
       const [history, setHistory] = useState([]);
       const [loadedFiles, setLoadedFiles] = useState([]);
+      
+      // 決算日データ（APIから取得）
+      const [earningsData, setEarningsData] = useState({});
+      const [earningsLoading, setEarningsLoading] = useState(false);
       
       // ユーザー管理
       const [currentUser, setCurrentUser] = useState('default');
@@ -957,6 +967,52 @@ ${adviceRequest}
       const totalCashValue = foreignCash.reduce((sum, c) => sum + c.value, 0);
       const totalValueJPY = totalUSValueJPY + totalJPValue + totalFundValue + totalCashValue;
 
+      // 米国株の決算日をAPIから取得
+      useEffect(() => {
+        const fetchEarnings = async () => {
+          if (usStocks.length === 0) return;
+          
+          setEarningsLoading(true);
+          const symbols = usStocks.map(s => s.ticker);
+          
+          try {
+            const apiEarnings = await fetchEarningsFromAPI(symbols);
+            
+            // APIから取得できなかった銘柄はフォールバックを使用
+            const merged = {};
+            symbols.forEach(symbol => {
+              if (apiEarnings[symbol]) {
+                merged[symbol] = apiEarnings[symbol];
+              } else if (FALLBACK_EARNINGS[symbol]) {
+                merged[symbol] = FALLBACK_EARNINGS[symbol];
+              }
+            });
+            
+            setEarningsData(merged);
+          } catch (error) {
+            console.error('Failed to fetch earnings:', error);
+            // エラー時はフォールバックのみ使用
+            const fallback = {};
+            symbols.forEach(symbol => {
+              if (FALLBACK_EARNINGS[symbol]) {
+                fallback[symbol] = FALLBACK_EARNINGS[symbol];
+              }
+            });
+            setEarningsData(fallback);
+          } finally {
+            setEarningsLoading(false);
+          }
+        };
+        
+        fetchEarnings();
+      }, [usStocks]);
+
+      // 決算日データを適用したallStocks
+      const allStocksWithEarnings = allStocks.map(stock => ({
+        ...stock,
+        earnings: stock.type === 'US' ? earningsData[stock.ticker] || null : null
+      }));
+
       // CSV読み込み後の自動保存
       useEffect(() => {
         // CSVから読み込んだ場合のみ自動保存（自動復元やインポートは除く）
@@ -1024,7 +1080,7 @@ ${adviceRequest}
       }, [handleFile]);
 
       const downloadICS = () => {
-        const ics = generateICS(allStocks, reminderDays);
+        const ics = generateICS(allStocksWithEarnings, reminderDays);
         const blob = new Blob([ics], { type: 'text/calendar;charset=utf-8' });
         const url = URL.createObjectURL(blob);
         const a = document.createElement('a');
@@ -1034,7 +1090,7 @@ ${adviceRequest}
         URL.revokeObjectURL(url);
       };
 
-      const stocksWithEarnings = allStocks.filter(s => s.earnings?.nextEarnings).sort((a, b) => 
+      const stocksWithEarnings = allStocksWithEarnings.filter(s => s.earnings?.nextEarnings).sort((a, b) => 
         a.earnings.nextEarnings.localeCompare(b.earnings.nextEarnings)
       );
 
@@ -1261,6 +1317,26 @@ ${adviceRequest}
                 {/* 決算タブ */}
                 {activeTab === 'calendar' && (
                   <div className="space-y-6">
+                    {/* 決算日取得ステータス */}
+                    {usStocks.length > 0 && (
+                      <div className={`rounded-xl p-4 ${earningsLoading ? 'bg-blue-50 border border-blue-200' : 'bg-green-50 border border-green-200'}`}>
+                        {earningsLoading ? (
+                          <div className="flex items-center gap-3">
+                            <div className="animate-spin h-5 w-5 border-2 border-blue-500 border-t-transparent rounded-full"></div>
+                            <span className="text-sm text-blue-700">決算日を取得中...</span>
+                          </div>
+                        ) : (
+                          <div className="flex items-center gap-2">
+                            <span className="text-green-600">✅</span>
+                            <span className="text-sm text-green-700">
+                              {Object.keys(earningsData).length}銘柄の決算日を取得しました
+                              {Object.values(earningsData).some(e => e?.estimated) && ' (一部推定)'}
+                            </span>
+                          </div>
+                        )}
+                      </div>
+                    )}
+
                     {/* Googleカレンダー連携 */}
                     <div className="bg-gradient-to-r from-blue-50 to-indigo-50 rounded-2xl p-6 border border-blue-100">
                       <div className="flex items-start justify-between gap-4 flex-wrap">
@@ -1630,7 +1706,7 @@ ${adviceRequest}
 
           <footer className="bg-white border-t border-slate-200 mt-8">
             <div className="max-w-6xl mx-auto px-4 py-4 text-center text-xs text-slate-500">
-              <p>楽天証券対応 資産管理＆決算カレンダー v5.1.2</p>
+              <p>楽天証券対応 資産管理＆決算カレンダー v6.0.0</p>
               <p className="mt-1">🔒 すべてのデータはブラウザ内で処理されます（サーバー送信なし）</p>
             </div>
           </footer>
