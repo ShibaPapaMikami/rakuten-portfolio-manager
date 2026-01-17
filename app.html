@@ -1,0 +1,1191 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>楽天証券対応 資産管理＆決算カレンダー</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://unpkg.com/react@18/umd/react.development.js" crossorigin></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js" crossorigin></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+JP:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          fontFamily: { sans: ['Noto Sans JP', 'sans-serif'] },
+        }
+      }
+    }
+  </script>
+  <style>
+    body { font-family: 'Noto Sans JP', sans-serif; }
+    .drag-active { border-color: #3B82F6 !important; background-color: #EFF6FF !important; }
+  </style>
+</head>
+<body class="bg-gray-50 min-h-screen">
+  <div id="root"></div>
+
+  <script type="text/babel">
+    const { useState, useEffect, useCallback } = React;
+
+    // ========== 決算日データベース ==========
+    const US_EARNINGS = {
+      'AAPL': { name: 'アップル', nextEarnings: '2026-01-30', time: 'AMC' },
+      'MSFT': { name: 'マイクロソフト', nextEarnings: '2026-01-28', time: 'AMC' },
+      'GOOGL': { name: 'アルファベット', nextEarnings: '2026-02-04', time: 'AMC' },
+      'AMZN': { name: 'アマゾン', nextEarnings: '2026-02-06', time: 'AMC' },
+      'NVDA': { name: 'エヌビディア', nextEarnings: '2026-02-26', time: 'AMC' },
+      'META': { name: 'メタ', nextEarnings: '2026-01-29', time: 'AMC' },
+      'TSLA': { name: 'テスラ', nextEarnings: '2026-01-29', time: 'AMC' },
+      'NFLX': { name: 'ネットフリックス', nextEarnings: '2026-01-21', time: 'AMC' },
+      'LLY': { name: 'イーライリリー', nextEarnings: '2026-02-06', time: 'BMO' },
+      'V': { name: 'ビザ', nextEarnings: '2026-01-30', time: 'AMC' },
+      'TSM': { name: 'TSMC', nextEarnings: '2026-01-16', time: 'BMO' },
+      'PLTR': { name: 'パランティア', nextEarnings: '2026-02-03', time: 'AMC' },
+      'KO': { name: 'コカ・コーラ', nextEarnings: '2026-02-11', time: 'BMO' },
+      'SOFI': { name: 'ソーファイ', nextEarnings: '2026-01-27', time: 'AMC' },
+      'IONQ': { name: 'IonQ', nextEarnings: '2026-03-12', time: 'AMC' },
+      'BRK B': { name: 'バークシャー', nextEarnings: '2026-02-22', time: 'BMO' },
+      'ACHR': { name: 'アーチャー', nextEarnings: '2026-02-27', time: 'AMC' },
+    };
+
+    const JP_EARNINGS = {
+      '1306': { name: 'TOPIX ETF', nextEarnings: null, time: null },
+      '1542': { name: '純銀上場信託', nextEarnings: null, time: null },
+      '1591': { name: 'JPX400 ETF', nextEarnings: null, time: null },
+      '8985': { name: 'ジャパン・ホテル・リート', nextEarnings: '2026-02-20', time: 'JP' },
+    };
+
+    // ========== ユーティリティ関数 ==========
+    function decodeShiftJIS(buffer) {
+      // 複数のエンコーディング名を試す
+      const encodings = ['shift_jis', 'Shift_JIS', 'sjis', 'SJIS', 'shift-jis', 'windows-31j'];
+      
+      for (const encoding of encodings) {
+        try {
+          const decoder = new TextDecoder(encoding);
+          const text = decoder.decode(buffer);
+          // 日本語が含まれているか確認
+          if (text.includes('■') || text.includes('ティッカー') || text.includes('銘柄') || text.includes('投資信託')) {
+            console.log('Successful decoding with:', encoding);
+            return text;
+          }
+        } catch (e) {
+          console.log('Failed to decode with:', encoding, e.message);
+        }
+      }
+      
+      // フォールバック: UTF-8として読み込み
+      console.log('Falling back to UTF-8');
+      return new TextDecoder('utf-8').decode(buffer);
+    }
+
+    function parseNumber(str) {
+      if (!str || str === '-') return 0;
+      return parseFloat(str.replace(/"/g, '').replace(/,/g, '').trim()) || 0;
+    }
+
+    // CSVの1行をパース（ダブルクォート内のカンマに対応）
+    function parseCSVLine(line) {
+      const result = [];
+      let current = '';
+      let inQuotes = false;
+      
+      for (let i = 0; i < line.length; i++) {
+        const char = line[i];
+        if (char === '"') {
+          inQuotes = !inQuotes;
+        } else if (char === ',' && !inQuotes) {
+          result.push(current.replace(/"/g, '').trim());
+          current = '';
+        } else {
+          current += char;
+        }
+      }
+      result.push(current.replace(/"/g, '').trim());
+      return result;
+    }
+
+    function detectCSVType(text) {
+      if (text.includes('ティッカー') && text.includes('USドル')) return 'US';
+      if (text.includes('銘柄コード') && !text.includes('ファンド')) return 'JP';
+      if (text.includes('ファンド') || text.includes('投資信託')) return 'FUND';
+      return 'UNKNOWN';
+    }
+
+    // ========== CSV解析関数 ==========
+    function parseUSStockCSV(text) {
+      console.log('=== parseUSStockCSV ===');
+      const lines = text.split('\n');
+      const stocks = [];
+      let currentSection = '';
+
+      for (const line of lines) {
+        if (line.includes('■特定口座') || line.includes('■NISA')) {
+          currentSection = line.includes('NISA') ? 'NISA' : '特定口座';
+          console.log('Section:', currentSection);
+          continue;
+        }
+        if (line.startsWith('"') && !line.includes('ティッカー')) {
+          const parts = parseCSVLine(line);
+          if (parts.length >= 13) {
+            const ticker = parts[0];
+            const name = parts[1];
+            const quantity = parseNumber(parts[3]);
+            const avgPrice = parseNumber(parts[8]);
+            const currentPrice = parseNumber(parts[10]);
+            const dailyChange = parseNumber(parts[11]);
+            const value = parseNumber(parts[12]);
+            const gainPercent = parseNumber(parts[13]);
+            
+            console.log(`US Stock: ${ticker}, qty=${quantity}, value=${value}`);
+
+            if (ticker && quantity > 0) {
+              stocks.push({
+                type: 'US', ticker, name, quantity, avgPrice, currentPrice,
+                dailyChange, monthlyChange: null, value, valueCurrency: 'USD',
+                gainPercent, section: currentSection, earnings: US_EARNINGS[ticker] || null
+              });
+            }
+          }
+        }
+      }
+      console.log('Total US stocks:', stocks.length, 'Total value:', stocks.reduce((s,x) => s + x.value, 0));
+      return mergeStocks(stocks);
+    }
+
+    function parseJPStockCSV(text) {
+      console.log('=== parseJPStockCSV ===');
+      console.log('Text preview:', text.slice(0, 500));
+      const lines = text.split('\n');
+      const stocks = [];
+      let currentSection = '';
+      let isNISASection = false;
+
+      for (const line of lines) {
+        if (line.includes('■特定口座')) { 
+          currentSection = '特定口座'; 
+          isNISASection = false;
+          console.log('Section: 特定口座');
+          continue; 
+        }
+        if (line.includes('■NISA')) { 
+          currentSection = 'NISA'; 
+          isNISASection = true;
+          console.log('Section: NISA');
+          continue; 
+        }
+        
+        if (line.startsWith('"') && !line.includes('銘柄コード')) {
+          const parts = parseCSVLine(line);
+          
+          // 合計行をスキップ
+          if (parts.some(p => p.includes('合計'))) continue;
+          
+          const code = parts[0];
+          const name = parts[1];
+          const quantity = parseNumber(parts[2]);
+          
+          console.log(`JP parsing: code=${code}, name=${name}, parts.length=${parts.length}, isNISA=${isNISASection}`);
+          
+          let avgPrice, currentPrice, monthlyChange, value, gainPercent;
+          
+          if (isNISASection && parts.length >= 16) {
+            // NISA口座は列が多い（18列）
+            avgPrice = parseNumber(parts[8]);
+            currentPrice = parseNumber(parts[12]);
+            monthlyChange = parseNumber(parts[13]);
+            value = parseNumber(parts[14]);
+            gainPercent = parseNumber(parts[15]);
+            console.log(`  NISA: value=${value} (parts[14]=${parts[14]})`);
+          } else if (parts.length >= 10) {
+            // 特定口座（12列）
+            avgPrice = parseNumber(parts[6]);
+            currentPrice = parseNumber(parts[8]);
+            monthlyChange = parseNumber(parts[9]);
+            value = parseNumber(parts[10]);
+            gainPercent = parseNumber(parts[11]);
+            console.log(`  特定: value=${value} (parts[10]=${parts[10]})`);
+          } else {
+            console.log(`  Skipped: parts.length=${parts.length}`);
+            continue;
+          }
+
+          if (code && quantity > 0 && value > 0) {
+            stocks.push({
+              type: 'JP', ticker: code, name, quantity, avgPrice, currentPrice,
+              dailyChange: null, monthlyChange, value, valueCurrency: 'JPY',
+              gainPercent, section: currentSection, earnings: JP_EARNINGS[code] || null
+            });
+          }
+        }
+      }
+      console.log('Total JP stocks:', stocks.length, 'Total value:', stocks.reduce((s,x) => s + x.value, 0));
+      return mergeStocks(stocks);
+    }
+
+    function parseFundCSV(text) {
+      console.log('=== parseFundCSV ===');
+      console.log('Text preview:', text.slice(0, 500));
+      const lines = text.split('\n');
+      const funds = [];
+
+      for (let i = 1; i < lines.length; i++) {
+        const line = lines[i];
+        if (!line.trim()) continue;
+        
+        const parts = parseCSVLine(line);
+        console.log(`Fund line ${i}: parts.length=${parts.length}`);
+        
+        if (parts.length >= 15) {
+          const section = parts[1];
+          const name = parts[2];
+          const quantity = parseNumber(parts[4]);
+          const avgPrice = parseNumber(parts[7]);
+          const currentPrice = parseNumber(parts[9]);
+          const dailyChange = parseNumber(parts[10]);
+          const monthlyChange = parseNumber(parts[11]);
+          const value = parseNumber(parts[12]);
+          const gainPercent = parseNumber(parts[14]);
+          
+          console.log(`  name=${name.slice(0,20)}, qty=${quantity}, value=${value}`);
+
+          if (name && quantity > 0 && value > 0) {
+            funds.push({
+              type: 'FUND', ticker: name.slice(0, 20), name, quantity, avgPrice, currentPrice,
+              dailyChange, monthlyChange, value, valueCurrency: 'JPY',
+              gainPercent, section, sections: [section], earnings: null
+            });
+          }
+        } else {
+          console.log(`  Skipped: parts.length < 15`);
+        }
+      }
+      console.log('Total funds:', funds.length, 'Total value:', funds.reduce((s,x) => s + x.value, 0));
+      return funds;
+    }
+
+    function mergeStocks(stocks) {
+      const merged = {};
+      for (const stock of stocks) {
+        if (merged[stock.ticker]) {
+          merged[stock.ticker].quantity += stock.quantity;
+          merged[stock.ticker].value += stock.value;
+          merged[stock.ticker].sections = [...new Set([...merged[stock.ticker].sections, stock.section])];
+        } else {
+          merged[stock.ticker] = { ...stock, sections: [stock.section] };
+        }
+      }
+      return Object.values(merged);
+    }
+
+    // ========== 日本時間変換 ==========
+    function convertToJapanTime(usDateStr, timeType) {
+      const usDate = new Date(usDateStr + 'T00:00:00');
+      if (timeType === 'BMO') return { date: usDate, japanTime: '21:00', calendarTime: '210000' };
+      if (timeType === 'AMC') {
+        const nextDay = new Date(usDate);
+        nextDay.setDate(nextDay.getDate() + 1);
+        return { date: nextDay, japanTime: '06:30', calendarTime: '063000' };
+      }
+      if (timeType === 'JP') return { date: usDate, japanTime: '15:00', calendarTime: '150000' };
+      return { date: usDate, japanTime: null, calendarTime: null };
+    }
+
+    // ========== ICS生成 ==========
+    function generateICS(allStocks, reminderDays = 3) {
+      const stocksWithEarnings = allStocks.filter(s => s.earnings?.nextEarnings);
+      
+      const events = stocksWithEarnings.map(stock => {
+        const timeType = stock.earnings.time;
+        const japanInfo = convertToJapanTime(stock.earnings.nextEarnings, timeType);
+        const dateStr = japanInfo.date.toISOString().split('T')[0].replace(/-/g, '');
+        
+        let dtStart, dtEnd;
+        if (japanInfo.calendarTime) {
+          dtStart = `DTSTART;TZID=Asia/Tokyo:${dateStr}T${japanInfo.calendarTime}`;
+          const endHour = timeType === 'AMC' ? '073000' : timeType === 'BMO' ? '220000' : '160000';
+          dtEnd = `DTEND;TZID=Asia/Tokyo:${dateStr}T${endHour}`;
+        } else {
+          const nextDay = new Date(japanInfo.date);
+          nextDay.setDate(nextDay.getDate() + 1);
+          dtStart = `DTSTART;VALUE=DATE:${dateStr}`;
+          dtEnd = `DTEND;VALUE=DATE:${nextDay.toISOString().split('T')[0].replace(/-/g, '')}`;
+        }
+
+        const marketLabel = stock.type === 'US' ? '🇺🇸' : '🇯🇵';
+        const timeNote = timeType === 'BMO' ? '（日本時間21時頃）' : 
+                        timeType === 'AMC' ? '（日本時間翌朝6時半頃）' : 
+                        timeType === 'JP' ? '（15時頃）' : '';
+
+        return `BEGIN:VEVENT
+${dtStart}
+${dtEnd}
+SUMMARY:📊 ${marketLabel} ${stock.ticker} ${stock.name} 決算${timeNote}
+DESCRIPTION:保有数量: ${stock.quantity}${stock.type === 'FUND' ? '口' : '株'}\\n評価額: ${stock.valueCurrency === 'USD' ? '$' : '¥'}${stock.value.toLocaleString()}\\n損益率: ${stock.gainPercent > 0 ? '+' : ''}${stock.gainPercent}%
+LOCATION:${stock.ticker}
+BEGIN:VALARM
+TRIGGER:-P${reminderDays}D
+ACTION:DISPLAY
+DESCRIPTION:${stock.ticker}の決算発表が${reminderDays}日後です
+END:VALARM
+END:VEVENT`;
+      });
+
+      return `BEGIN:VCALENDAR
+VERSION:2.0
+PRODID:-//楽天証券対応資産管理ツール//JP
+CALSCALE:GREGORIAN
+METHOD:PUBLISH
+X-WR-CALNAME:保有株式決算カレンダー
+X-WR-TIMEZONE:Asia/Tokyo
+BEGIN:VTIMEZONE
+TZID:Asia/Tokyo
+BEGIN:STANDARD
+TZOFFSETFROM:+0900
+TZOFFSETTO:+0900
+TZNAME:JST
+DTSTART:19700101T000000
+END:STANDARD
+END:VTIMEZONE
+${events.join('\n')}
+END:VCALENDAR`;
+    }
+
+    // ========== 履歴管理 ==========
+    const STORAGE_KEY = 'rakuten_portfolio_history';
+
+    function saveToHistory(data) {
+      const history = JSON.parse(localStorage.getItem(STORAGE_KEY) || '[]');
+      const today = new Date().toISOString().split('T')[0];
+      const existingIndex = history.findIndex(h => h.date === today);
+      const newEntry = { date: today, timestamp: Date.now(), ...data };
+      
+      if (existingIndex >= 0) history[existingIndex] = newEntry;
+      else history.push(newEntry);
+      
+      const trimmed = history.slice(-365);
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(trimmed));
+      return trimmed;
+    }
+
+    function loadHistory() {
+      return JSON.parse(localStorage.getItem(STORAGE_KEY) || '[]');
+    }
+
+    // ========== シンプルな円グラフコンポーネント ==========
+    function SimplePieChart({ data }) {
+      const total = data.reduce((sum, d) => sum + d.value, 0);
+      if (total === 0) return null;
+      
+      let currentAngle = 0;
+      const paths = data.map((d, i) => {
+        const percentage = d.value / total;
+        const angle = percentage * 360;
+        const startAngle = currentAngle;
+        const endAngle = currentAngle + angle;
+        currentAngle = endAngle;
+        
+        const startRad = (startAngle - 90) * Math.PI / 180;
+        const endRad = (endAngle - 90) * Math.PI / 180;
+        const largeArc = angle > 180 ? 1 : 0;
+        
+        const x1 = 100 + 80 * Math.cos(startRad);
+        const y1 = 100 + 80 * Math.sin(startRad);
+        const x2 = 100 + 80 * Math.cos(endRad);
+        const y2 = 100 + 80 * Math.sin(endRad);
+        
+        const pathD = `M 100 100 L ${x1} ${y1} A 80 80 0 ${largeArc} 1 ${x2} ${y2} Z`;
+        
+        return (
+          <path key={i} d={pathD} fill={d.color} stroke="white" strokeWidth="2">
+            <title>{d.name}: ¥{Math.round(d.value).toLocaleString()} ({(percentage * 100).toFixed(1)}%)</title>
+          </path>
+        );
+      });
+
+      return (
+        <div className="flex items-center gap-4">
+          <svg width="200" height="200" viewBox="0 0 200 200">
+            {paths}
+            <circle cx="100" cy="100" r="50" fill="white" />
+          </svg>
+          <div className="space-y-2">
+            {data.map((d, i) => (
+              <div key={i} className="flex items-center gap-2 text-sm">
+                <div className="w-3 h-3 rounded-full" style={{ backgroundColor: d.color }}></div>
+                <span className="text-slate-600">{d.name}</span>
+                <span className="font-medium">{(d.value / total * 100).toFixed(0)}%</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      );
+    }
+
+    // ========== シンプルな折れ線グラフコンポーネント ==========
+    function SimpleLineChart({ data }) {
+      if (data.length < 2) {
+        return (
+          <div className="h-64 flex items-center justify-center text-slate-500">
+            <div className="text-center">
+              <p className="mb-2">履歴データが不足しています</p>
+              <p className="text-sm">「履歴保存」を押して定期的に保存してください</p>
+            </div>
+          </div>
+        );
+      }
+
+      const values = data.map(d => d.value);
+      const maxVal = Math.max(...values);
+      const minVal = Math.min(...values);
+      const range = maxVal - minVal || 1;
+      const padding = range * 0.1;
+
+      const width = 500;
+      const height = 200;
+      const marginLeft = 50;
+      const marginBottom = 30;
+
+      const points = data.map((d, i) => {
+        const x = marginLeft + (i / (data.length - 1)) * (width - marginLeft - 20);
+        const y = height - marginBottom - ((d.value - minVal + padding) / (range + padding * 2)) * (height - marginBottom - 20);
+        return { x, y, ...d };
+      });
+
+      const pathD = points.map((p, i) => `${i === 0 ? 'M' : 'L'} ${p.x} ${p.y}`).join(' ');
+
+      return (
+        <svg width="100%" height="250" viewBox={`0 0 ${width} ${height + 20}`} className="overflow-visible">
+          {/* グリッド線 */}
+          {[0, 1, 2, 3, 4].map(i => {
+            const y = 20 + (i / 4) * (height - marginBottom - 20);
+            const val = maxVal + padding - (i / 4) * (range + padding * 2);
+            return (
+              <g key={i}>
+                <line x1={marginLeft} y1={y} x2={width - 20} y2={y} stroke="#E2E8F0" strokeDasharray="3 3" />
+                <text x={marginLeft - 5} y={y + 4} textAnchor="end" fill="#94A3B8" fontSize="10">{Math.round(val)}万</text>
+              </g>
+            );
+          })}
+          
+          {/* 折れ線 */}
+          <path d={pathD} fill="none" stroke="#3B82F6" strokeWidth="2" />
+          
+          {/* データポイント */}
+          {points.map((p, i) => (
+            <g key={i}>
+              <circle cx={p.x} cy={p.y} r="4" fill="#3B82F6" />
+              {i % Math.ceil(data.length / 6) === 0 && (
+                <text x={p.x} y={height - 10} textAnchor="middle" fill="#94A3B8" fontSize="10">{p.date}</text>
+              )}
+            </g>
+          ))}
+        </svg>
+      );
+    }
+
+    // ========== メインコンポーネント ==========
+    function App() {
+      const [usStocks, setUSStocks] = useState([]);
+      const [jpStocks, setJPStocks] = useState([]);
+      const [funds, setFunds] = useState([]);
+      const [exchangeRate, setExchangeRate] = useState(158);
+      const [isDragging, setIsDragging] = useState(false);
+      const [activeTab, setActiveTab] = useState('overview');
+      const [reminderDays, setReminderDays] = useState(3);
+      const [history, setHistory] = useState([]);
+      const [loadedFiles, setLoadedFiles] = useState([]);
+      
+      // 投資家プロファイル
+      const [profile, setProfile] = useState({
+        age: '',
+        purpose: '老後資金',
+        riskTolerance: '中',
+        concerns: '',
+      });
+      const [adviceType, setAdviceType] = useState('balanced');
+
+      useEffect(() => {
+        setHistory(loadHistory());
+        // プロファイル読み込み
+        const savedProfile = localStorage.getItem('investor_profile');
+        if (savedProfile) setProfile(JSON.parse(savedProfile));
+      }, []);
+      
+      const saveProfile = () => {
+        localStorage.setItem('investor_profile', JSON.stringify(profile));
+        alert('プロファイルを保存しました！');
+      };
+
+      // AIプロンプト生成
+      const generateAIPrompt = () => {
+        const today = new Date().toLocaleDateString('ja-JP', { year: 'numeric', month: 'long', day: 'numeric' });
+        
+        const adviceTypeText = {
+          short: '【短期（1ヶ月以内）】',
+          medium: '【中期（3〜6ヶ月）】',
+          long: '【長期（1年以上）】',
+          balanced: '【総合（短期・中期・長期すべて）】'
+        }[adviceType];
+
+        const adviceRequest = {
+          short: `
+## 📅 短期（1ヶ月以内）の分析をお願いします
+
+以下の観点でアドバイスしてください：
+1. 直近の決算発表予定と予想される影響
+2. 今週〜来月の重要経済イベント（FOMC、雇用統計など）
+3. テクニカル的な売買タイミング
+4. 短期的なリスク要因と対処法
+5. 保有銘柄に関する直近のニュース・材料`,
+          medium: `
+## 📆 中期（3〜6ヶ月）の分析をお願いします
+
+以下の観点でアドバイスしてください：
+1. セクターローテーションの見通し
+2. 季節性・アノマリー（Sell in May、年末ラリーなど）
+3. 金利動向と株式市場への影響
+4. リバランスの必要性と具体的な提案
+5. 中期的に注目すべき銘柄・テーマ`,
+          long: `
+## 📈 長期（1年以上）の分析をお願いします
+
+以下の観点でアドバイスしてください：
+1. 資産配分（アセットアロケーション）の評価
+2. 長期トレンドとの整合性（AI、高齢化、脱炭素など）
+3. 地域分散の適切性（米国偏重リスクなど）
+4. 積立戦略の最適化
+5. 10年後を見据えたポートフォリオ改善案`,
+          balanced: `
+## ⚖️ 総合分析をお願いします
+
+### 📅 短期（1ヶ月以内）
+- 直近の決算・経済イベントの影響
+- 保有銘柄の最新ニュース・材料
+
+### 📆 中期（3〜6ヶ月）
+- 季節性アノマリーの考慮
+- リバランスの提案
+
+### 📈 長期（1年以上）
+- アセットアロケーションの評価
+- 長期的な改善提案`
+        }[adviceType];
+
+        // 保有銘柄リスト生成
+        let holdingsText = '';
+        
+        if (funds.length > 0) {
+          holdingsText += '\n【投資信託】\n';
+          funds.forEach(f => {
+            holdingsText += `- ${f.name}: ¥${f.value.toLocaleString()} (${f.gainPercent >= 0 ? '+' : ''}${f.gainPercent}%)\n`;
+          });
+        }
+        
+        if (jpStocks.length > 0) {
+          holdingsText += '\n【日本株・ETF】\n';
+          jpStocks.forEach(s => {
+            holdingsText += `- ${s.name}(${s.ticker}): ¥${s.value.toLocaleString()} (${s.gainPercent >= 0 ? '+' : ''}${s.gainPercent}%)\n`;
+          });
+        }
+        
+        if (usStocks.length > 0) {
+          holdingsText += '\n【米国株】\n';
+          usStocks.forEach(s => {
+            holdingsText += `- ${s.name}(${s.ticker}): $${s.value.toLocaleString()} (${s.gainPercent >= 0 ? '+' : ''}${s.gainPercent}%)\n`;
+          });
+        }
+
+        // 決算予定
+        let earningsText = '';
+        if (stocksWithEarnings.length > 0) {
+          earningsText = '\n【直近の決算予定】\n';
+          stocksWithEarnings.slice(0, 5).forEach(s => {
+            const jpInfo = convertToJapanTime(s.earnings.nextEarnings, s.earnings.time);
+            earningsText += `- ${s.ticker}: ${jpInfo.date.toLocaleDateString('ja-JP', { month: 'short', day: 'numeric' })} ${jpInfo.japanTime || ''}\n`;
+          });
+        }
+
+        return `あなたは経験豊富な投資アドバイザーです。
+以下のポートフォリオについて、最新の市場動向を踏まえて分析・アドバイスをお願いします。
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+📊 ポートフォリオ分析リクエスト ${adviceTypeText}
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+分析日: ${today}
+
+## 👤 投資家プロファイル
+- 年齢: ${profile.age || '未設定'}
+- 投資目的: ${profile.purpose}
+- リスク許容度: ${profile.riskTolerance}
+- 質問・相談: ${profile.concerns || '特になし'}
+
+## 💰 現在のポートフォリオ
+
+総資産: ¥${Math.round(totalValueJPY).toLocaleString()}
+
+資産配分:
+- 米国株: ¥${Math.round(totalUSValueJPY).toLocaleString()} (${totalValueJPY > 0 ? Math.round(totalUSValueJPY / totalValueJPY * 100) : 0}%)
+- 日本株: ¥${Math.round(totalJPValue).toLocaleString()} (${totalValueJPY > 0 ? Math.round(totalJPValue / totalValueJPY * 100) : 0}%)
+- 投資信託: ¥${Math.round(totalFundValue).toLocaleString()} (${totalValueJPY > 0 ? Math.round(totalFundValue / totalValueJPY * 100) : 0}%)
+
+為替レート: ${exchangeRate} 円/USD
+${holdingsText}${earningsText}
+${adviceRequest}
+
+## 📰 追加リクエスト
+- 保有銘柄に関する**最新のニュースや材料**があれば教えてください
+- 現在の市場で注意すべき**アノマリーや季節性**があれば教えてください
+- Web検索を使って**最新情報**を確認してください
+
+回答は日本語でお願いします。`;
+      };
+
+      const allStocks = [...usStocks, ...jpStocks, ...funds];
+      const hasData = allStocks.length > 0;
+
+      const totalUSValueJPY = usStocks.reduce((sum, s) => sum + s.value * exchangeRate, 0);
+      const totalJPValue = jpStocks.reduce((sum, s) => sum + s.value, 0);
+      const totalFundValue = funds.reduce((sum, s) => sum + s.value, 0);
+      const totalValueJPY = totalUSValueJPY + totalJPValue + totalFundValue;
+
+      const handleFile = useCallback((file) => {
+        console.log('=== handleFile ===');
+        console.log('File name:', file.name);
+        const reader = new FileReader();
+        reader.onload = (event) => {
+          try {
+            const buffer = event.target.result;
+            const text = decodeShiftJIS(new Uint8Array(buffer));
+            console.log('Decoded text length:', text.length);
+            console.log('First 300 chars:', text.slice(0, 300));
+            const csvType = detectCSVType(text);
+            console.log('CSV Type detected:', csvType);
+
+            if (csvType === 'US') {
+              const parsed = parseUSStockCSV(text);
+              console.log('US Stocks parsed:', parsed.length, 'items');
+              setUSStocks(parsed);
+              const rateMatch = text.match(/参考為替レート.*?"([\d.]+)"/);
+              if (rateMatch) {
+                console.log('Exchange rate found:', rateMatch[1]);
+                setExchangeRate(parseFloat(rateMatch[1]));
+              }
+              setLoadedFiles(prev => [...prev.filter(f => f !== '米国株'), '米国株']);
+            } else if (csvType === 'JP') {
+              const parsed = parseJPStockCSV(text);
+              console.log('JP Stocks parsed:', parsed.length, 'items');
+              setJPStocks(parsed);
+              setLoadedFiles(prev => [...prev.filter(f => f !== '日本株'), '日本株']);
+            } else if (csvType === 'FUND') {
+              const parsed = parseFundCSV(text);
+              console.log('Funds parsed:', parsed.length, 'items');
+              setFunds(parsed);
+              setLoadedFiles(prev => [...prev.filter(f => f !== '投資信託'), '投資信託']);
+            } else {
+              alert('対応していないCSV形式です');
+            }
+          } catch (error) {
+            alert('CSVの読み込みに失敗しました');
+            console.error(error);
+          }
+        };
+        reader.readAsArrayBuffer(file);
+      }, []);
+
+      const handleDrop = useCallback((e) => {
+        e.preventDefault();
+        setIsDragging(false);
+        const files = e.dataTransfer?.files || e.target?.files;
+        if (files) Array.from(files).forEach(handleFile);
+      }, [handleFile]);
+
+      const saveCurrentData = () => {
+        if (!hasData) return;
+        const newHistory = saveToHistory({
+          totalValueJPY,
+          usStocks: usStocks.map(s => ({ ticker: s.ticker, value: s.value, gainPercent: s.gainPercent })),
+          jpStocks: jpStocks.map(s => ({ ticker: s.ticker, value: s.value, gainPercent: s.gainPercent })),
+          funds: funds.map(s => ({ ticker: s.ticker, value: s.value, gainPercent: s.gainPercent })),
+          exchangeRate
+        });
+        setHistory(newHistory);
+        alert('履歴に保存しました！');
+      };
+
+      const downloadICS = () => {
+        const ics = generateICS(allStocks, reminderDays);
+        const blob = new Blob([ics], { type: 'text/calendar;charset=utf-8' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `earnings_calendar_${new Date().toISOString().split('T')[0]}.ics`;
+        a.click();
+        URL.revokeObjectURL(url);
+      };
+
+      const stocksWithEarnings = allStocks.filter(s => s.earnings?.nextEarnings).sort((a, b) => 
+        a.earnings.nextEarnings.localeCompare(b.earnings.nextEarnings)
+      );
+
+      const pieData = [
+        { name: '米国株', value: totalUSValueJPY, color: '#3B82F6' },
+        { name: '日本株', value: totalJPValue, color: '#EF4444' },
+        { name: '投資信託', value: totalFundValue, color: '#10B981' },
+      ].filter(d => d.value > 0);
+
+      const chartData = history.slice(-30).map(h => ({
+        date: h.date.slice(5),
+        value: Math.round(h.totalValueJPY / 10000)
+      }));
+
+      return (
+        <div className="min-h-screen bg-gradient-to-br from-slate-50 to-slate-100">
+          {/* ヘッダー */}
+          <header className="bg-white border-b border-slate-200 sticky top-0 z-50">
+            <div className="max-w-6xl mx-auto px-4 py-4">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-3">
+                  <div className="w-10 h-10 bg-gradient-to-br from-blue-600 to-indigo-600 rounded-xl flex items-center justify-center">
+                    <svg className="w-6 h-6 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" />
+                    </svg>
+                  </div>
+                  <div>
+                    <h1 className="text-lg font-bold text-slate-800">楽天証券 資産管理＆決算カレンダー</h1>
+                    <p className="text-xs text-slate-500">米国株・日本株・投資信託を統合管理</p>
+                  </div>
+                </div>
+                {hasData && (
+                  <div className="text-sm text-slate-500">
+                    {loadedFiles.join(' / ')} 読込済
+                  </div>
+                )}
+              </div>
+            </div>
+          </header>
+
+          <main className="max-w-6xl mx-auto px-4 py-6">
+            {/* CSV読み込みエリア */}
+            <div className="mb-6">
+              <div
+                className={`border-2 border-dashed rounded-xl p-6 text-center transition-all cursor-pointer ${isDragging ? 'drag-active' : 'border-slate-300 hover:border-slate-400 bg-white'}`}
+                onDragOver={(e) => { e.preventDefault(); setIsDragging(true); }}
+                onDragLeave={() => setIsDragging(false)}
+                onDrop={handleDrop}
+                onClick={() => document.getElementById('csv-input').click()}
+              >
+                <div className="flex items-center justify-center gap-4">
+                  <div className="text-4xl">📁</div>
+                  <div className="text-left">
+                    <p className="font-medium text-slate-700">CSVをドラッグ&ドロップ（複数可）</p>
+                    <p className="text-xs text-slate-500">またはクリックしてファイルを選択 - 米国株・日本株・投資信託のCSVを自動判別</p>
+                  </div>
+                </div>
+                <input type="file" accept=".csv" multiple onChange={handleDrop} className="hidden" id="csv-input" />
+                {loadedFiles.length > 0 && (
+                  <div className="mt-3 flex items-center justify-center gap-2">
+                    {loadedFiles.map(f => (
+                      <span key={f} className="text-xs bg-green-100 text-green-700 px-2 py-1 rounded-full">✓ {f}</span>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </div>
+
+            {hasData && (
+              <>
+                {/* タブ */}
+                <div className="flex gap-1 mb-6 bg-white rounded-lg p-1 shadow-sm">
+                  {[
+                    { id: 'overview', label: '📊 概要' },
+                    { id: 'calendar', label: '📅 決算' },
+                    { id: 'history', label: '📈 推移' },
+                    { id: 'holdings', label: '📋 保有一覧' },
+                    { id: 'ai', label: '🤖 AIアドバイス' },
+                  ].map(tab => (
+                    <button
+                      key={tab.id}
+                      onClick={() => setActiveTab(tab.id)}
+                      className={`flex-1 py-2 px-4 rounded-md text-sm font-medium transition-colors ${
+                        activeTab === tab.id ? 'bg-blue-600 text-white' : 'text-slate-600 hover:bg-slate-100'
+                      }`}
+                    >
+                      {tab.label}
+                    </button>
+                  ))}
+                </div>
+
+                {/* 概要タブ */}
+                {activeTab === 'overview' && (
+                  <div className="space-y-6">
+                    <div className="bg-gradient-to-r from-blue-600 to-indigo-600 rounded-2xl p-6 text-white">
+                      <p className="text-blue-100 text-sm">総資産評価額</p>
+                      <p className="text-4xl font-bold mt-1">¥{Math.round(totalValueJPY).toLocaleString()}</p>
+                      <div className="flex gap-4 mt-4 text-sm flex-wrap">
+                        <div><span className="text-blue-200">米国株</span><span className="ml-2 font-medium">¥{Math.round(totalUSValueJPY).toLocaleString()}</span></div>
+                        <div><span className="text-blue-200">日本株</span><span className="ml-2 font-medium">¥{Math.round(totalJPValue).toLocaleString()}</span></div>
+                        <div><span className="text-blue-200">投資信託</span><span className="ml-2 font-medium">¥{Math.round(totalFundValue).toLocaleString()}</span></div>
+                      </div>
+                      <p className="text-xs text-blue-200 mt-2">為替レート: {exchangeRate} 円/USD</p>
+                    </div>
+
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                      <div className="bg-white rounded-2xl p-6 shadow-sm">
+                        <h3 className="font-bold text-slate-800 mb-4">資産配分</h3>
+                        <SimplePieChart data={pieData} />
+                      </div>
+
+                      <div className="bg-white rounded-2xl p-6 shadow-sm">
+                        <h3 className="font-bold text-slate-800 mb-4">直近の決算予定</h3>
+                        <div className="space-y-3">
+                          {stocksWithEarnings.slice(0, 5).map(stock => {
+                            const jpInfo = convertToJapanTime(stock.earnings.nextEarnings, stock.earnings.time);
+                            return (
+                              <div key={stock.ticker} className="flex items-center justify-between p-3 bg-slate-50 rounded-lg">
+                                <div className="flex items-center gap-2">
+                                  <span className="text-lg">{stock.type === 'US' ? '🇺🇸' : '🇯🇵'}</span>
+                                  <div>
+                                    <p className="font-medium text-slate-800">{stock.ticker}</p>
+                                    <p className="text-xs text-slate-500">{stock.name}</p>
+                                  </div>
+                                </div>
+                                <div className="text-right">
+                                  <p className="text-sm font-medium text-slate-700">{jpInfo.date.toLocaleDateString('ja-JP', { month: 'short', day: 'numeric' })}</p>
+                                  <p className="text-xs text-slate-500">{jpInfo.japanTime || ''}</p>
+                                </div>
+                              </div>
+                            );
+                          })}
+                          {stocksWithEarnings.length === 0 && <p className="text-slate-500 text-sm">決算予定のある銘柄はありません</p>}
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                {/* 決算タブ */}
+                {activeTab === 'calendar' && (
+                  <div className="space-y-6">
+                    {/* Googleカレンダー連携 */}
+                    <div className="bg-gradient-to-r from-blue-50 to-indigo-50 rounded-2xl p-6 border border-blue-100">
+                      <div className="flex items-start justify-between gap-4 flex-wrap">
+                        <div>
+                          <h3 className="font-bold text-slate-800 flex items-center gap-2">
+                            <span className="text-2xl">📅</span> Googleカレンダーに追加
+                          </h3>
+                          <p className="text-sm text-slate-600 mt-1">保有銘柄の決算日をGoogleカレンダーにインポートできます</p>
+                        </div>
+                        <button
+                          onClick={downloadICS}
+                          className="flex items-center gap-2 bg-gradient-to-r from-blue-600 to-indigo-600 text-white px-4 py-2 rounded-lg text-sm font-medium hover:from-blue-700 hover:to-indigo-700 transition-all shadow-lg shadow-blue-500/25 whitespace-nowrap"
+                        >
+                          ⬇️ .icsファイルをダウンロード
+                        </button>
+                      </div>
+                      
+                      <div className="mt-4 flex items-center gap-3">
+                        <span className="text-sm text-slate-600">リマインダー:</span>
+                        <select value={reminderDays} onChange={(e) => setReminderDays(parseInt(e.target.value))} className="border border-slate-200 rounded-lg px-3 py-1.5 text-sm bg-white">
+                          <option value={1}>1日前</option>
+                          <option value={3}>3日前</option>
+                          <option value={7}>1週間前</option>
+                        </select>
+                      </div>
+
+                      <details className="mt-4">
+                        <summary className="text-sm text-blue-600 cursor-pointer hover:text-blue-800">📖 インポート手順を見る</summary>
+                        <div className="mt-3 bg-white rounded-lg p-4 text-sm text-slate-600 space-y-2">
+                          <p><strong>1.</strong> 上のボタンで .ics ファイルをダウンロード</p>
+                          <p><strong>2.</strong> <a href="https://calendar.google.com/calendar/r/settings/export" target="_blank" rel="noopener noreferrer" className="text-blue-600 underline">Googleカレンダーの設定</a> を開く</p>
+                          <p><strong>3.</strong> 左メニュー「インポート/エクスポート」→「インポート」</p>
+                          <p><strong>4.</strong> ダウンロードした .ics ファイルを選択</p>
+                          <p><strong>5.</strong> カレンダーを選んで「インポート」をクリック</p>
+                          <p className="text-xs text-slate-400 mt-2">💡 決算日には日本時間が設定されています（米国市場前→21時頃、市場後→翌朝6時半頃）</p>
+                        </div>
+                      </details>
+                    </div>
+
+                    {/* 決算スケジュール一覧 */}
+                    <div className="bg-white rounded-2xl shadow-sm overflow-hidden">
+                      <div className="p-4 border-b border-slate-200">
+                        <h3 className="font-bold text-slate-800">📊 決算スケジュール</h3>
+                      </div>
+                      <div className="divide-y divide-slate-100">
+                      {stocksWithEarnings.map(stock => {
+                        const jpInfo = convertToJapanTime(stock.earnings.nextEarnings, stock.earnings.time);
+                        const now = new Date();
+                        const daysUntil = Math.ceil((jpInfo.date - now) / (1000 * 60 * 60 * 24));
+                        const isUpcoming = daysUntil >= 0 && daysUntil <= 7;
+                        
+                        return (
+                          <div key={stock.ticker} className={`p-4 ${isUpcoming ? 'bg-amber-50' : ''}`}>
+                            <div className="flex items-center justify-between">
+                              <div className="flex items-center gap-3">
+                                <span className="text-2xl">{stock.type === 'US' ? '🇺🇸' : '🇯🇵'}</span>
+                                <div>
+                                  <p className="font-bold text-slate-800">{stock.ticker}</p>
+                                  <p className="text-sm text-slate-500">{stock.name}</p>
+                                </div>
+                              </div>
+                              <div className="text-right">
+                                <p className={`font-medium ${isUpcoming ? 'text-amber-600' : 'text-slate-700'}`}>
+                                  🇯🇵 {jpInfo.date.toLocaleDateString('ja-JP', { month: 'long', day: 'numeric' })}
+                                  {jpInfo.japanTime && <span className="text-xs ml-1">({jpInfo.japanTime})</span>}
+                                </p>
+                                {daysUntil >= 0 && <p className={`text-xs ${isUpcoming ? 'text-amber-500 font-medium' : 'text-slate-400'}`}>{daysUntil === 0 ? '今日！' : `あと${daysUntil}日`}</p>}
+                                <p className="text-xs text-slate-400 mt-0.5">🇺🇸 {stock.earnings.nextEarnings} {stock.earnings.time}</p>
+                              </div>
+                            </div>
+                          </div>
+                        );
+                      })}
+                      {stocksWithEarnings.length === 0 && <div className="p-8 text-center text-slate-500">決算予定のある銘柄がありません</div>}
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                {/* 推移タブ */}
+                {activeTab === 'history' && (
+                  <div className="space-y-6">
+                    <div className="bg-white rounded-2xl p-6 shadow-sm">
+                      <h3 className="font-bold text-slate-800 mb-4">📈 資産推移（過去30日）</h3>
+                      <SimpleLineChart data={chartData} />
+                    </div>
+
+                    {history.length > 0 && (
+                      <div className="bg-white rounded-2xl p-6 shadow-sm">
+                        <h3 className="font-bold text-slate-800 mb-4">保存履歴</h3>
+                        <div className="space-y-2 max-h-64 overflow-y-auto">
+                          {history.slice().reverse().slice(0, 10).map((h, i) => (
+                            <div key={i} className="flex items-center justify-between p-3 bg-slate-50 rounded-lg">
+                              <span className="text-sm text-slate-600">{h.date}</span>
+                              <span className="font-medium text-slate-800">¥{Math.round(h.totalValueJPY).toLocaleString()}</span>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {/* 保有一覧タブ */}
+                {activeTab === 'holdings' && (
+                  <div className="space-y-6">
+                    {/* 履歴保存セクション */}
+                    <div className="bg-gradient-to-r from-amber-50 to-orange-50 rounded-2xl p-6 border border-amber-100">
+                      <div className="flex items-start justify-between gap-4 flex-wrap">
+                        <div>
+                          <h3 className="font-bold text-slate-800 flex items-center gap-2">
+                            <span className="text-2xl">📈</span> 資産推移を記録
+                          </h3>
+                          <p className="text-sm text-slate-600 mt-1">定期的に保存すると「推移」タブでグラフが見られます</p>
+                        </div>
+                        <button
+                          onClick={saveCurrentData}
+                          className="flex items-center gap-2 bg-gradient-to-r from-amber-500 to-orange-500 text-white px-4 py-2 rounded-lg text-sm font-medium hover:from-amber-600 hover:to-orange-600 transition-all shadow-lg shadow-amber-500/25 whitespace-nowrap"
+                        >
+                          💾 今日のデータを保存
+                        </button>
+                      </div>
+                      {history.length > 0 && (
+                        <p className="text-xs text-slate-500 mt-3">📊 {history.length}日分の履歴があります（最終保存: {history[history.length - 1].date}）</p>
+                      )}
+                    </div>
+
+                    {usStocks.length > 0 && (
+                      <div className="bg-white rounded-2xl shadow-sm overflow-hidden">
+                        <div className="p-4 border-b border-slate-200 bg-blue-50">
+                          <h3 className="font-bold text-blue-800">🇺🇸 米国株（{usStocks.length}銘柄）</h3>
+                        </div>
+                        <div className="divide-y divide-slate-100">
+                          {usStocks.map(stock => (
+                            <div key={stock.ticker} className="p-4 flex items-center justify-between">
+                              <div>
+                                <p className="font-bold text-slate-800">{stock.ticker}</p>
+                                <p className="text-sm text-slate-500">{stock.name}</p>
+                              </div>
+                              <div className="text-right">
+                                <p className="font-medium text-slate-800">${stock.value.toLocaleString()}</p>
+                                <p className={`text-sm ${stock.gainPercent >= 0 ? 'text-green-600' : 'text-red-600'}`}>{stock.gainPercent >= 0 ? '+' : ''}{stock.gainPercent}%</p>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+
+                    {jpStocks.length > 0 && (
+                      <div className="bg-white rounded-2xl shadow-sm overflow-hidden">
+                        <div className="p-4 border-b border-slate-200 bg-red-50">
+                          <h3 className="font-bold text-red-800">🇯🇵 日本株（{jpStocks.length}銘柄）</h3>
+                        </div>
+                        <div className="divide-y divide-slate-100">
+                          {jpStocks.map(stock => (
+                            <div key={stock.ticker} className="p-4 flex items-center justify-between">
+                              <div>
+                                <p className="font-bold text-slate-800">{stock.ticker}</p>
+                                <p className="text-sm text-slate-500">{stock.name}</p>
+                              </div>
+                              <div className="text-right">
+                                <p className="font-medium text-slate-800">¥{stock.value.toLocaleString()}</p>
+                                <p className={`text-sm ${stock.gainPercent >= 0 ? 'text-green-600' : 'text-red-600'}`}>{stock.gainPercent >= 0 ? '+' : ''}{stock.gainPercent}%</p>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+
+                    {funds.length > 0 && (
+                      <div className="bg-white rounded-2xl shadow-sm overflow-hidden">
+                        <div className="p-4 border-b border-slate-200 bg-green-50">
+                          <h3 className="font-bold text-green-800">📊 投資信託（{funds.length}本）</h3>
+                        </div>
+                        <div className="divide-y divide-slate-100">
+                          {funds.map((fund, i) => (
+                            <div key={i} className="p-4 flex items-center justify-between">
+                              <div className="flex-1 min-w-0 mr-4">
+                                <p className="font-bold text-slate-800 truncate">{fund.name}</p>
+                                <p className="text-xs text-slate-500">{fund.section}</p>
+                              </div>
+                              <div className="text-right flex-shrink-0">
+                                <p className="font-medium text-slate-800">¥{fund.value.toLocaleString()}</p>
+                                <p className={`text-sm ${fund.gainPercent >= 0 ? 'text-green-600' : 'text-red-600'}`}>{fund.gainPercent >= 0 ? '+' : ''}{fund.gainPercent}%</p>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {/* AIアドバイスタブ */}
+                {activeTab === 'ai' && (
+                  <div className="space-y-6">
+                    {/* 投資家プロファイル（シンプル版） */}
+                    <div className="bg-white rounded-2xl p-6 shadow-sm">
+                      <div className="flex items-center justify-between mb-4">
+                        <h3 className="font-bold text-slate-800">👤 あなたの情報</h3>
+                        <button onClick={saveProfile} className="text-sm bg-blue-100 hover:bg-blue-200 text-blue-700 px-3 py-1 rounded-lg transition-colors">
+                          💾 保存
+                        </button>
+                      </div>
+                      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                        <div>
+                          <label className="block text-sm text-slate-600 mb-1">年齢</label>
+                          <input type="text" value={profile.age} onChange={e => setProfile({...profile, age: e.target.value})} placeholder="例: 35歳" className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm" />
+                        </div>
+                        <div>
+                          <label className="block text-sm text-slate-600 mb-1">投資目的</label>
+                          <select value={profile.purpose} onChange={e => setProfile({...profile, purpose: e.target.value})} className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm">
+                            <option>老後資金</option>
+                            <option>住宅購入</option>
+                            <option>教育資金</option>
+                            <option>FIRE・早期退職</option>
+                            <option>資産形成</option>
+                            <option>その他</option>
+                          </select>
+                        </div>
+                        <div>
+                          <label className="block text-sm text-slate-600 mb-1">リスク許容度</label>
+                          <select value={profile.riskTolerance} onChange={e => setProfile({...profile, riskTolerance: e.target.value})} className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm">
+                            <option value="低">低（-10%で不安）</option>
+                            <option value="中">中（-20%まで耐えられる）</option>
+                            <option value="高">高（-30%以上でも継続）</option>
+                          </select>
+                        </div>
+                      </div>
+                      <div className="mt-4">
+                        <label className="block text-sm text-slate-600 mb-1">質問・相談したいこと</label>
+                        <textarea value={profile.concerns} onChange={e => setProfile({...profile, concerns: e.target.value})} placeholder="例: 米国株比率が高すぎる？ リバランスのタイミングは？" className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm h-20 resize-none" />
+                      </div>
+                    </div>
+
+                    {/* アドバイスタイプ選択 */}
+                    <div className="bg-white rounded-2xl p-6 shadow-sm">
+                      <h3 className="font-bold text-slate-800 mb-4">📋 アドバイスの種類</h3>
+                      <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                        {[
+                          { id: 'short', label: '📅 短期', desc: '1ヶ月以内' },
+                          { id: 'medium', label: '📆 中期', desc: '3〜6ヶ月' },
+                          { id: 'long', label: '📈 長期', desc: '1年以上' },
+                          { id: 'balanced', label: '⚖️ 総合', desc: '全期間バランス' },
+                        ].map(type => (
+                          <button
+                            key={type.id}
+                            onClick={() => setAdviceType(type.id)}
+                            className={`p-4 rounded-xl border-2 transition-all text-left ${adviceType === type.id ? 'border-blue-500 bg-blue-50' : 'border-slate-200 hover:border-slate-300'}`}
+                          >
+                            <div className="font-medium text-slate-800">{type.label}</div>
+                            <div className="text-xs text-slate-500">{type.desc}</div>
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+
+                    {/* 生成プロンプト */}
+                    <div className="bg-white rounded-2xl p-6 shadow-sm">
+                      <div className="flex items-center justify-between mb-4">
+                        <h3 className="font-bold text-slate-800">📤 AIに送るプロンプト</h3>
+                        <button
+                          onClick={() => {
+                            const prompt = generateAIPrompt();
+                            navigator.clipboard.writeText(prompt);
+                            alert('クリップボードにコピーしました！\n\nClaude、ChatGPT、Geminiなどに貼り付けてください。');
+                          }}
+                          className="flex items-center gap-2 bg-gradient-to-r from-blue-600 to-indigo-600 text-white px-4 py-2 rounded-lg text-sm font-medium hover:from-blue-700 hover:to-indigo-700 transition-all shadow-lg shadow-blue-500/25"
+                        >
+                          📋 コピーしてAIに質問
+                        </button>
+                      </div>
+                      <div className="bg-slate-50 rounded-lg p-4 max-h-96 overflow-y-auto">
+                        <pre className="text-xs text-slate-700 whitespace-pre-wrap font-mono">{generateAIPrompt()}</pre>
+                      </div>
+                      <div className="mt-4 flex gap-2 flex-wrap">
+                        <a href="https://claude.ai" target="_blank" rel="noopener noreferrer" className="text-xs bg-orange-100 text-orange-700 px-3 py-1.5 rounded-full hover:bg-orange-200 transition-colors">🟠 Claude で開く</a>
+                        <a href="https://chat.openai.com" target="_blank" rel="noopener noreferrer" className="text-xs bg-emerald-100 text-emerald-700 px-3 py-1.5 rounded-full hover:bg-emerald-200 transition-colors">🟢 ChatGPT で開く</a>
+                        <a href="https://gemini.google.com" target="_blank" rel="noopener noreferrer" className="text-xs bg-blue-100 text-blue-700 px-3 py-1.5 rounded-full hover:bg-blue-200 transition-colors">🔵 Gemini で開く</a>
+                      </div>
+                    </div>
+                  </div>
+                )}
+              </>
+            )}
+
+            {!hasData && (
+              <div className="bg-white rounded-2xl p-8 shadow-sm">
+                <h3 className="font-bold text-slate-800 mb-4">📖 使い方</h3>
+                <ol className="space-y-3 text-sm text-slate-600">
+                  <li className="flex gap-3"><span className="flex-shrink-0 w-6 h-6 bg-blue-100 text-blue-600 rounded-full flex items-center justify-center text-xs font-bold">1</span><span>楽天証券にログイン → 「保有商品一覧」を開く</span></li>
+                  <li className="flex gap-3"><span className="flex-shrink-0 w-6 h-6 bg-blue-100 text-blue-600 rounded-full flex items-center justify-center text-xs font-bold">2</span><span>「米国株式」「日本株式」「投資信託」それぞれで「CSV保存」</span></li>
+                  <li className="flex gap-3"><span className="flex-shrink-0 w-6 h-6 bg-blue-100 text-blue-600 rounded-full flex items-center justify-center text-xs font-bold">3</span><span>ダウンロードしたCSVをまとめて上のエリアにドラッグ&ドロップ</span></li>
+                  <li className="flex gap-3"><span className="flex-shrink-0 w-6 h-6 bg-blue-100 text-blue-600 rounded-full flex items-center justify-center text-xs font-bold">4</span><span>「決算カレンダー」ボタンで.icsをダウンロード → Googleカレンダーにインポート</span></li>
+                </ol>
+                <div className="mt-6 p-4 bg-amber-50 rounded-lg">
+                  <p className="text-sm text-amber-700">💡 <strong>定期的に「履歴保存」</strong>すると、資産の推移グラフが見られるようになります！</p>
+                </div>
+              </div>
+            )}
+          </main>
+
+          <footer className="bg-white border-t border-slate-200 mt-8">
+            <div className="max-w-6xl mx-auto px-4 py-4 text-center text-xs text-slate-500">
+              <p>楽天証券対応 資産管理＆決算カレンダー v3.0.0</p>
+              <p className="mt-1">🔒 すべてのデータはブラウザ内で処理されます（サーバー送信なし）</p>
+            </div>
+          </footer>
+        </div>
+      );
+    }
+
+    // Reactアプリをマウント
+    const root = ReactDOM.createRoot(document.getElementById('root'));
+    root.render(<App />);
+  </script>
+</body>
+</html>
