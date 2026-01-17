@@ -111,7 +111,50 @@
       if (text.includes('ティッカー') && text.includes('USドル')) return 'US';
       if (text.includes('銘柄コード') && !text.includes('ファンド')) return 'JP';
       if (text.includes('ファンド') || text.includes('投資信託')) return 'FUND';
+      if (text.includes('通貨') && text.includes('残高［現地通貨］') && text.includes('残高［円］')) return 'FOREIGN_CASH';
       return 'UNKNOWN';
+    }
+
+    // ========== 外貨預り金解析関数 ==========
+    function parseForeignCashCSV(text) {
+      console.log('=== parseForeignCashCSV ===');
+      const lines = text.split('\n');
+      const cashItems = [];
+      
+      for (const line of lines) {
+        // ヘッダー行をスキップ
+        if (line.includes('通貨') && line.includes('残高')) continue;
+        if (!line.trim()) continue;
+        
+        const parts = parseCSVLine(line);
+        if (parts.length >= 3) {
+          const currency = parts[0]; // "米ドル(円換算額)"
+          const balanceLocal = parts[1]; // "581.80USD"
+          const balanceJPY = parseNumber(parts[2]); // "91,988"
+          
+          console.log(`Foreign Cash: ${currency}, ${balanceLocal}, ¥${balanceJPY}`);
+          
+          if (currency && balanceJPY > 0) {
+            // 通貨名から通貨コードを抽出
+            let currencyCode = 'USD';
+            if (currency.includes('米ドル')) currencyCode = 'USD';
+            else if (currency.includes('ユーロ')) currencyCode = 'EUR';
+            else if (currency.includes('豪ドル')) currencyCode = 'AUD';
+            
+            cashItems.push({
+              type: 'CASH',
+              ticker: currencyCode,
+              name: currency.replace(/\(.*\)/, '').trim(),
+              value: balanceJPY,
+              valueCurrency: 'JPY',
+              gainPercent: 0,
+              balanceLocal: balanceLocal
+            });
+          }
+        }
+      }
+      console.log('Total foreign cash items:', cashItems.length, 'Total value:', cashItems.reduce((s,x) => s + x.value, 0));
+      return cashItems;
     }
 
     // ========== CSV解析関数 ==========
@@ -484,6 +527,7 @@ END:VCALENDAR`;
       const [usStocks, setUSStocks] = useState([]);
       const [jpStocks, setJPStocks] = useState([]);
       const [funds, setFunds] = useState([]);
+      const [foreignCash, setForeignCash] = useState([]);
       const [exchangeRate, setExchangeRate] = useState(158);
       const [isDragging, setIsDragging] = useState(false);
       const [activeTab, setActiveTab] = useState('overview');
@@ -538,6 +582,7 @@ END:VCALENDAR`;
             if (data.usStocks) setUSStocks(data.usStocks);
             if (data.jpStocks) setJPStocks(data.jpStocks);
             if (data.funds) setFunds(data.funds);
+            if (data.foreignCash) setForeignCash(data.foreignCash);
             if (data.exchangeRate) setExchangeRate(data.exchangeRate);
             if (data.history) setHistory(data.history);
             if (data.lastSaved) setLastSaved(data.lastSaved);
@@ -551,11 +596,12 @@ END:VCALENDAR`;
       };
       
       // データを自動保存（CSV読み込み後に呼ばれる）
-      const autoSaveData = (newUSStocks, newJPStocks, newFunds, newExchangeRate) => {
+      const autoSaveData = (newUSStocks, newJPStocks, newFunds, newForeignCash, newExchangeRate) => {
         const totalUS = newUSStocks.reduce((sum, s) => sum + s.value, 0);
         const totalJP = newJPStocks.reduce((sum, s) => sum + s.value, 0);
         const totalFundsVal = newFunds.reduce((sum, f) => sum + f.value, 0);
-        const totalValueJPY = (totalUS * newExchangeRate) + totalJP + totalFundsVal;
+        const totalCash = newForeignCash.reduce((sum, c) => sum + c.value, 0);
+        const totalValueJPY = (totalUS * newExchangeRate) + totalJP + totalFundsVal + totalCash;
         
         const now = new Date().toISOString();
         const today = now.split('T')[0];
@@ -569,13 +615,14 @@ END:VCALENDAR`;
         
         // localStorageに保存
         const saveData = {
-          version: '5.0.0',
+          version: '5.1.0',
           user: currentUser,
           lastSaved: now,
           exchangeRate: newExchangeRate,
           usStocks: newUSStocks,
           jpStocks: newJPStocks,
           funds: newFunds,
+          foreignCash: newForeignCash,
           history: newHistory
         };
         localStorage.setItem(`portfolio_data_${currentUser}`, JSON.stringify(saveData));
@@ -599,6 +646,7 @@ END:VCALENDAR`;
         setUSStocks([]);
         setJPStocks([]);
         setFunds([]);
+        setForeignCash([]);
         setHistory([]);
         setLoadedFiles([]);
         setLastSaved(null);
@@ -645,7 +693,8 @@ END:VCALENDAR`;
         const totalUS = usStocks.reduce((sum, s) => sum + s.value, 0);
         const totalJP = jpStocks.reduce((sum, s) => sum + s.value, 0);
         const totalFundsVal = funds.reduce((sum, f) => sum + f.value, 0);
-        const totalValueJPY = (totalUS * exchangeRate) + totalJP + totalFundsVal;
+        const totalCash = foreignCash.reduce((sum, c) => sum + c.value, 0);
+        const totalValueJPY = (totalUS * exchangeRate) + totalJP + totalFundsVal + totalCash;
         
         if (totalValueJPY === 0) {
           alert('バックアップするデータがありません。');
@@ -654,7 +703,7 @@ END:VCALENDAR`;
         
         const today = new Date().toISOString().split('T')[0];
         const data = {
-          version: '5.0.0',
+          version: '5.1.0',
           type: 'backup',
           user: currentUser,
           exportedAt: new Date().toISOString(),
@@ -662,6 +711,7 @@ END:VCALENDAR`;
           usStocks: usStocks,
           jpStocks: jpStocks,
           funds: funds,
+          foreignCash: foreignCash,
           history: history,
           profile: profile
         };
@@ -690,8 +740,8 @@ END:VCALENDAR`;
             try {
               const data = JSON.parse(event.target.result);
               
-              // v5形式のバックアップ
-              if (data.version === '5.0.0' && data.usStocks) {
+              // v5.1形式のバックアップ（外貨預り金対応）
+              if ((data.version === '5.1.0' || data.version === '5.0.0') && data.usStocks) {
                 if (!latestData || (data.exportedAt && data.exportedAt > latestData.exportedAt)) {
                   latestData = data;
                 }
@@ -716,6 +766,7 @@ END:VCALENDAR`;
                     usStocks: data.breakdown?.usStocks?.items || [],
                     jpStocks: data.breakdown?.jpStocks?.items || [],
                     funds: data.breakdown?.funds?.items || [],
+                    foreignCash: [],
                     exchangeRate: data.exchangeRate || 158,
                     exportedAt: data.savedAt
                   };
@@ -740,6 +791,7 @@ END:VCALENDAR`;
                   if (latestData.usStocks) setUSStocks(latestData.usStocks);
                   if (latestData.jpStocks) setJPStocks(latestData.jpStocks);
                   if (latestData.funds) setFunds(latestData.funds);
+                  if (latestData.foreignCash) setForeignCash(latestData.foreignCash);
                   if (latestData.exchangeRate) setExchangeRate(latestData.exchangeRate);
                   if (latestData.profile) setProfile(latestData.profile);
                   setViewMode('history');
@@ -748,13 +800,14 @@ END:VCALENDAR`;
                 
                 // localStorageにも保存
                 const saveData = {
-                  version: '5.0.0',
+                  version: '5.1.0',
                   user: currentUser,
                   lastSaved: new Date().toISOString(),
                   exchangeRate: latestData?.exchangeRate || exchangeRate,
                   usStocks: latestData?.usStocks || usStocks,
                   jpStocks: latestData?.jpStocks || jpStocks,
                   funds: latestData?.funds || funds,
+                  foreignCash: latestData?.foreignCash || foreignCash,
                   history: newHistory
                 };
                 localStorage.setItem(`portfolio_data_${currentUser}`, JSON.stringify(saveData));
@@ -895,19 +948,20 @@ ${adviceRequest}
       };
 
       const allStocks = [...usStocks, ...jpStocks, ...funds];
-      const hasData = allStocks.length > 0;
+      const hasData = allStocks.length > 0 || foreignCash.length > 0;
 
       const totalUSValueJPY = usStocks.reduce((sum, s) => sum + s.value * exchangeRate, 0);
       const totalJPValue = jpStocks.reduce((sum, s) => sum + s.value, 0);
       const totalFundValue = funds.reduce((sum, s) => sum + s.value, 0);
-      const totalValueJPY = totalUSValueJPY + totalJPValue + totalFundValue;
+      const totalCashValue = foreignCash.reduce((sum, c) => sum + c.value, 0);
+      const totalValueJPY = totalUSValueJPY + totalJPValue + totalFundValue + totalCashValue;
 
       // CSV読み込み後の自動保存
       useEffect(() => {
         // CSVから読み込んだ場合のみ自動保存（自動復元やインポートは除く）
-        const isCSVLoaded = loadedFiles.some(f => ['米国株', '日本株', '投資信託'].includes(f));
+        const isCSVLoaded = loadedFiles.some(f => ['米国株', '日本株', '投資信託', '外貨'].includes(f));
         if (isCSVLoaded && hasData) {
-          autoSaveData(usStocks, jpStocks, funds, exchangeRate);
+          autoSaveData(usStocks, jpStocks, funds, foreignCash, exchangeRate);
           setViewMode('csv');
         }
       }, [loadedFiles]);
@@ -945,6 +999,11 @@ ${adviceRequest}
               console.log('Funds parsed:', parsed.length, 'items');
               setFunds(parsed);
               setLoadedFiles(prev => [...prev.filter(f => f !== '投資信託'), '投資信託']);
+            } else if (csvType === 'FOREIGN_CASH') {
+              const parsed = parseForeignCashCSV(text);
+              console.log('Foreign Cash parsed:', parsed.length, 'items');
+              setForeignCash(parsed);
+              setLoadedFiles(prev => [...prev.filter(f => f !== '外貨'), '外貨']);
             } else {
               alert('対応していないCSV形式です');
             }
@@ -982,6 +1041,7 @@ ${adviceRequest}
         { name: '米国株', value: totalUSValueJPY, color: '#3B82F6' },
         { name: '日本株', value: totalJPValue, color: '#EF4444' },
         { name: '投資信託', value: totalFundValue, color: '#10B981' },
+        { name: '外貨預り金', value: totalCashValue, color: '#F59E0B' },
       ].filter(d => d.value > 0);
 
       const chartData = history.slice(-30).map(h => ({
@@ -1156,6 +1216,9 @@ ${adviceRequest}
                         <div><span className="text-blue-200">米国株</span><span className="ml-2 font-medium">¥{Math.round(totalUSValueJPY).toLocaleString()}</span></div>
                         <div><span className="text-blue-200">日本株</span><span className="ml-2 font-medium">¥{Math.round(totalJPValue).toLocaleString()}</span></div>
                         <div><span className="text-blue-200">投資信託</span><span className="ml-2 font-medium">¥{Math.round(totalFundValue).toLocaleString()}</span></div>
+                        {totalCashValue > 0 && (
+                          <div><span className="text-blue-200">外貨預り金</span><span className="ml-2 font-medium">¥{Math.round(totalCashValue).toLocaleString()}</span></div>
+                        )}
                       </div>
                       <p className="text-xs text-blue-200 mt-2">為替レート: {exchangeRate} 円/USD</p>
                     </div>
@@ -1428,6 +1491,27 @@ ${adviceRequest}
                         </div>
                       </div>
                     )}
+
+                    {foreignCash.length > 0 && (
+                      <div className="bg-white rounded-2xl shadow-sm overflow-hidden">
+                        <div className="p-4 border-b border-slate-200 bg-amber-50">
+                          <h3 className="font-bold text-amber-800">💰 外貨預り金（{foreignCash.length}通貨）</h3>
+                        </div>
+                        <div className="divide-y divide-slate-100">
+                          {foreignCash.map((cash, i) => (
+                            <div key={i} className="p-4 flex items-center justify-between">
+                              <div>
+                                <p className="font-bold text-slate-800">{cash.name}</p>
+                                <p className="text-xs text-slate-500">{cash.balanceLocal}</p>
+                              </div>
+                              <div className="text-right">
+                                <p className="font-medium text-slate-800">¥{cash.value.toLocaleString()}</p>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
                   </div>
                 )}
 
@@ -1545,7 +1629,7 @@ ${adviceRequest}
 
           <footer className="bg-white border-t border-slate-200 mt-8">
             <div className="max-w-6xl mx-auto px-4 py-4 text-center text-xs text-slate-500">
-              <p>楽天証券対応 資産管理＆決算カレンダー v5.0.0</p>
+              <p>楽天証券対応 資産管理＆決算カレンダー v5.1.0</p>
               <p className="mt-1">🔒 すべてのデータはブラウザ内で処理されます（サーバー送信なし）</p>
             </div>
           </footer>
