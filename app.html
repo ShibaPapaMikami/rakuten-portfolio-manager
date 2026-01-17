@@ -353,27 +353,6 @@ ${events.join('\n')}
 END:VCALENDAR`;
     }
 
-    // ========== 履歴管理 ==========
-    const STORAGE_KEY = 'rakuten_portfolio_history';
-
-    function saveToHistory(data) {
-      const history = JSON.parse(localStorage.getItem(STORAGE_KEY) || '[]');
-      const today = new Date().toISOString().split('T')[0];
-      const existingIndex = history.findIndex(h => h.date === today);
-      const newEntry = { date: today, timestamp: Date.now(), ...data };
-      
-      if (existingIndex >= 0) history[existingIndex] = newEntry;
-      else history.push(newEntry);
-      
-      const trimmed = history.slice(-365);
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(trimmed));
-      return trimmed;
-    }
-
-    function loadHistory() {
-      return JSON.parse(localStorage.getItem(STORAGE_KEY) || '[]');
-    }
-
     // ========== シンプルな円グラフコンポーネント ==========
     function SimplePieChart({ data }) {
       const total = data.reduce((sum, d) => sum + d.value, 0);
@@ -426,12 +405,26 @@ END:VCALENDAR`;
 
     // ========== シンプルな折れ線グラフコンポーネント ==========
     function SimpleLineChart({ data }) {
-      if (data.length < 2) {
+      if (data.length === 0) {
         return (
           <div className="h-64 flex items-center justify-center text-slate-500">
             <div className="text-center">
-              <p className="mb-2">履歴データが不足しています</p>
-              <p className="text-sm">「履歴保存」を押して定期的に保存してください</p>
+              <p className="mb-2">履歴データがありません</p>
+              <p className="text-sm">「💾 今日のデータを保存」でデータを保存してください</p>
+            </div>
+          </div>
+        );
+      }
+      
+      // 1件の場合は単一ポイント表示
+      if (data.length === 1) {
+        const d = data[0];
+        return (
+          <div className="h-64 flex items-center justify-center">
+            <div className="text-center">
+              <p className="text-4xl font-bold text-blue-600">¥{Math.round(d.value * 10000).toLocaleString()}</p>
+              <p className="text-slate-500 mt-2">{d.date}</p>
+              <p className="text-sm text-slate-400 mt-1">データが増えるとグラフが表示されます</p>
             </div>
           </div>
         );
@@ -498,6 +491,16 @@ END:VCALENDAR`;
       const [history, setHistory] = useState([]);
       const [loadedFiles, setLoadedFiles] = useState([]);
       
+      // ユーザー管理
+      const [currentUser, setCurrentUser] = useState('default');
+      const [users, setUsers] = useState(['default']);
+      const [showUserModal, setShowUserModal] = useState(false);
+      const [newUserName, setNewUserName] = useState('');
+      
+      // 履歴からの表示モード（CSVなしでも表示可能に）
+      const [viewMode, setViewMode] = useState('csv'); // 'csv' | 'history'
+      const [selectedHistoryDate, setSelectedHistoryDate] = useState(null);
+      
       // 投資家プロファイル
       const [profile, setProfile] = useState({
         age: '',
@@ -508,15 +511,188 @@ END:VCALENDAR`;
       const [adviceType, setAdviceType] = useState('balanced');
 
       useEffect(() => {
-        setHistory(loadHistory());
-        // プロファイル読み込み
-        const savedProfile = localStorage.getItem('investor_profile');
+        // ユーザーリスト読み込み
+        const savedUsers = localStorage.getItem('portfolio_users');
+        if (savedUsers) {
+          setUsers(JSON.parse(savedUsers));
+        }
+        const savedCurrentUser = localStorage.getItem('portfolio_current_user');
+        if (savedCurrentUser) {
+          setCurrentUser(savedCurrentUser);
+        }
+        
+        // プロファイル読み込み（ユーザーごと）
+        const savedProfile = localStorage.getItem(`investor_profile_${savedCurrentUser || 'default'}`);
         if (savedProfile) setProfile(JSON.parse(savedProfile));
       }, []);
       
+      // ユーザー変更時の処理
+      const switchUser = (userName) => {
+        setCurrentUser(userName);
+        localStorage.setItem('portfolio_current_user', userName);
+        // そのユーザーのプロファイルを読み込み
+        const savedProfile = localStorage.getItem(`investor_profile_${userName}`);
+        if (savedProfile) {
+          setProfile(JSON.parse(savedProfile));
+        } else {
+          setProfile({ age: '', purpose: '老後資金', riskTolerance: '中', concerns: '' });
+        }
+        // 履歴をクリア（新しい履歴をインポートしてもらう）
+        setHistory([]);
+        // CSVデータもクリア
+        setUSStocks([]);
+        setJPStocks([]);
+        setFunds([]);
+        setLoadedFiles([]);
+      };
+      
+      // 新規ユーザー追加
+      const addUser = () => {
+        if (!newUserName.trim()) return;
+        if (users.includes(newUserName.trim())) {
+          alert('同じ名前のユーザーが存在します');
+          return;
+        }
+        const newUsers = [...users, newUserName.trim()];
+        setUsers(newUsers);
+        localStorage.setItem('portfolio_users', JSON.stringify(newUsers));
+        setNewUserName('');
+        setShowUserModal(false);
+        switchUser(newUserName.trim());
+      };
+      
+      // ユーザー削除
+      const deleteUser = (userName) => {
+        if (userName === 'default') {
+          alert('デフォルトユーザーは削除できません');
+          return;
+        }
+        if (!confirm(`「${userName}」を削除しますか？`)) return;
+        const newUsers = users.filter(u => u !== userName);
+        setUsers(newUsers);
+        localStorage.setItem('portfolio_users', JSON.stringify(newUsers));
+        if (currentUser === userName) {
+          switchUser('default');
+        }
+      };
+      
       const saveProfile = () => {
-        localStorage.setItem('investor_profile', JSON.stringify(profile));
+        localStorage.setItem(`investor_profile_${currentUser}`, JSON.stringify(profile));
         alert('プロファイルを保存しました！');
+      };
+      
+      // 今日のデータをJSONファイルとして保存
+      const saveDataToFile = () => {
+        const totalUS = usStocks.reduce((sum, s) => sum + s.value, 0);
+        const totalJP = jpStocks.reduce((sum, s) => sum + s.value, 0);
+        const totalFunds = funds.reduce((sum, f) => sum + f.value, 0);
+        const totalValueJPY = (totalUS * exchangeRate) + totalJP + totalFunds;
+        
+        if (totalValueJPY === 0) {
+          alert('保存するデータがありません。先にCSVを読み込んでください。');
+          return;
+        }
+        
+        const today = new Date().toISOString().split('T')[0];
+        const data = {
+          version: '4.0.0',
+          user: currentUser,
+          date: today,
+          savedAt: new Date().toISOString(),
+          exchangeRate: exchangeRate,
+          totalValueJPY: totalValueJPY,
+          breakdown: {
+            usStocks: { total: totalUS, totalJPY: totalUS * exchangeRate, items: usStocks },
+            jpStocks: { total: totalJP, items: jpStocks },
+            funds: { total: totalFunds, items: funds }
+          },
+          profile: profile
+        };
+        
+        const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `portfolio-${currentUser}-${today}.json`;
+        a.click();
+        URL.revokeObjectURL(url);
+        
+        // 履歴にも追加
+        const historyEntry = { date: today, totalValueJPY, exchangeRate };
+        const newHistory = [...history.filter(h => h.date !== today), historyEntry].sort((a, b) => a.date.localeCompare(b.date));
+        setHistory(newHistory);
+        
+        alert(`ファイルをダウンロードしました！\n保存先を選んで管理してください。`);
+      };
+      
+      // 履歴ファイル（複数可）を読み込み
+      const loadHistoryFiles = (files) => {
+        const fileArray = Array.from(files);
+        let loadedCount = 0;
+        let newHistory = [...history];
+        let latestData = null;
+        
+        fileArray.forEach(file => {
+          const reader = new FileReader();
+          reader.onload = (event) => {
+            try {
+              const data = JSON.parse(event.target.result);
+              
+              // v4形式のファイルの場合
+              if (data.version && data.date && data.totalValueJPY) {
+                const entry = {
+                  date: data.date,
+                  totalValueJPY: data.totalValueJPY,
+                  exchangeRate: data.exchangeRate || 158,
+                  breakdown: data.breakdown
+                };
+                newHistory = [...newHistory.filter(h => h.date !== entry.date), entry];
+                
+                // 最新のデータを保持
+                if (!latestData || data.date > latestData.date) {
+                  latestData = data;
+                }
+              }
+              // 旧形式（historyが配列）の場合
+              else if (data.history && Array.isArray(data.history)) {
+                data.history.forEach(h => {
+                  newHistory = [...newHistory.filter(e => e.date !== h.date), h];
+                });
+              }
+              
+              loadedCount++;
+              
+              // 全ファイル読み込み完了
+              if (loadedCount === fileArray.length) {
+                newHistory.sort((a, b) => a.date.localeCompare(b.date));
+                setHistory(newHistory);
+                
+                // 最新のデータがあれば表示用にセット
+                if (latestData && latestData.breakdown) {
+                  if (latestData.breakdown.usStocks?.items) {
+                    setUSStocks(latestData.breakdown.usStocks.items);
+                  }
+                  if (latestData.breakdown.jpStocks?.items) {
+                    setJPStocks(latestData.breakdown.jpStocks.items);
+                  }
+                  if (latestData.breakdown.funds?.items) {
+                    setFunds(latestData.breakdown.funds.items);
+                  }
+                  if (latestData.exchangeRate) {
+                    setExchangeRate(latestData.exchangeRate);
+                  }
+                  setViewMode('history');
+                  setSelectedHistoryDate(latestData.date);
+                }
+                
+                alert(`${loadedCount}件のファイルから履歴を読み込みました`);
+              }
+            } catch (err) {
+              console.error('Failed to parse file:', file.name, err);
+            }
+          };
+          reader.readAsText(file);
+        });
       };
 
       // AIプロンプト生成
@@ -702,19 +878,6 @@ ${adviceRequest}
         if (files) Array.from(files).forEach(handleFile);
       }, [handleFile]);
 
-      const saveCurrentData = () => {
-        if (!hasData) return;
-        const newHistory = saveToHistory({
-          totalValueJPY,
-          usStocks: usStocks.map(s => ({ ticker: s.ticker, value: s.value, gainPercent: s.gainPercent })),
-          jpStocks: jpStocks.map(s => ({ ticker: s.ticker, value: s.value, gainPercent: s.gainPercent })),
-          funds: funds.map(s => ({ ticker: s.ticker, value: s.value, gainPercent: s.gainPercent })),
-          exchangeRate
-        });
-        setHistory(newHistory);
-        alert('履歴に保存しました！');
-      };
-
       const downloadICS = () => {
         const ics = generateICS(allStocks, reminderDays);
         const blob = new Blob([ics], { type: 'text/calendar;charset=utf-8' });
@@ -743,8 +906,38 @@ ${adviceRequest}
 
       return (
         <div className="min-h-screen bg-gradient-to-br from-slate-50 to-slate-100">
+          {/* ユーザー追加モーダル */}
+          {showUserModal && (
+            <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
+              <div className="bg-white rounded-xl p-6 w-80 shadow-xl">
+                <h3 className="font-bold text-slate-800 mb-4">👤 新規ユーザー追加</h3>
+                <input
+                  type="text"
+                  value={newUserName}
+                  onChange={(e) => setNewUserName(e.target.value)}
+                  placeholder="ユーザー名（例: 配偶者）"
+                  className="w-full border border-slate-300 rounded-lg px-3 py-2 mb-4"
+                />
+                <div className="flex gap-2">
+                  <button
+                    onClick={() => setShowUserModal(false)}
+                    className="flex-1 px-4 py-2 border border-slate-300 rounded-lg text-slate-600 hover:bg-slate-50"
+                  >
+                    キャンセル
+                  </button>
+                  <button
+                    onClick={addUser}
+                    className="flex-1 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700"
+                  >
+                    追加
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+
           {/* ヘッダー */}
-          <header className="bg-white border-b border-slate-200 sticky top-0 z-50">
+          <header className="bg-white border-b border-slate-200 sticky top-0 z-40">
             <div className="max-w-6xl mx-auto px-4 py-4">
               <div className="flex items-center justify-between">
                 <div className="flex items-center gap-3">
@@ -758,11 +951,43 @@ ${adviceRequest}
                     <p className="text-xs text-slate-500">米国株・日本株・投資信託を統合管理</p>
                   </div>
                 </div>
-                {hasData && (
-                  <div className="text-sm text-slate-500">
-                    {loadedFiles.join(' / ')} 読込済
+                
+                {/* ユーザー切り替え */}
+                <div className="flex items-center gap-3">
+                  <div className="flex items-center gap-2">
+                    <span className="text-sm text-slate-500">👤</span>
+                    <select
+                      value={currentUser}
+                      onChange={(e) => {
+                        if (e.target.value === '__add__') {
+                          setShowUserModal(true);
+                        } else {
+                          switchUser(e.target.value);
+                        }
+                      }}
+                      className="border border-slate-200 rounded-lg px-3 py-1.5 text-sm bg-white"
+                    >
+                      {users.map(u => (
+                        <option key={u} value={u}>{u === 'default' ? '自分' : u}</option>
+                      ))}
+                      <option value="__add__">+ 新規追加...</option>
+                    </select>
+                    {currentUser !== 'default' && (
+                      <button
+                        onClick={() => deleteUser(currentUser)}
+                        className="text-red-500 hover:text-red-700 text-sm"
+                        title="このユーザーを削除"
+                      >
+                        🗑️
+                      </button>
+                    )}
                   </div>
-                )}
+                  {hasData && (
+                    <div className="text-sm text-slate-500 hidden sm:block">
+                      {loadedFiles.join(' / ')} 読込済
+                    </div>
+                  )}
+                </div>
               </div>
             </div>
           </header>
@@ -975,85 +1200,52 @@ ${adviceRequest}
                 {/* 保有一覧タブ */}
                 {activeTab === 'holdings' && (
                   <div className="space-y-6">
-                    {/* 履歴保存セクション */}
-                    <div className="bg-gradient-to-r from-amber-50 to-orange-50 rounded-2xl p-6 border border-amber-100">
-                      <div className="flex items-start justify-between gap-4 flex-wrap">
-                        <div>
-                          <h3 className="font-bold text-slate-800 flex items-center gap-2">
-                            <span className="text-2xl">📈</span> 資産推移を記録
-                          </h3>
-                          <p className="text-sm text-slate-600 mt-1">定期的に保存すると「推移」タブでグラフが見られます</p>
-                        </div>
-                        <button
-                          onClick={saveCurrentData}
-                          className="flex items-center gap-2 bg-gradient-to-r from-amber-500 to-orange-500 text-white px-4 py-2 rounded-lg text-sm font-medium hover:from-amber-600 hover:to-orange-600 transition-all shadow-lg shadow-amber-500/25 whitespace-nowrap"
-                        >
-                          💾 今日のデータを保存
-                        </button>
-                      </div>
-                      {history.length > 0 && (
-                        <p className="text-xs text-slate-500 mt-3">📊 {history.length}日分の履歴があります（最終保存: {history[history.length - 1].date}）</p>
-                      )}
+                    {/* データ管理セクション */}
+                    <div className="bg-gradient-to-r from-blue-50 to-indigo-50 rounded-2xl p-6 border border-blue-100">
+                      <h3 className="font-bold text-slate-800 flex items-center gap-2 mb-4">
+                        <span className="text-2xl">💾</span> データ管理
+                      </h3>
                       
-                      {/* エクスポート/インポート */}
-                      <div className="mt-4 pt-4 border-t border-amber-200">
-                        <div className="flex items-center justify-between flex-wrap gap-3">
-                          <p className="text-sm text-slate-600">📁 履歴をファイルに保存・復元</p>
-                          <div className="flex gap-2">
-                            <button
-                              onClick={() => {
-                                const data = {
-                                  version: '3.0.0',
-                                  exportedAt: new Date().toISOString(),
-                                  history: history,
-                                  profile: profile
-                                };
-                                const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
-                                const url = URL.createObjectURL(blob);
-                                const a = document.createElement('a');
-                                a.href = url;
-                                a.download = `portfolio-backup-${new Date().toISOString().split('T')[0]}.json`;
-                                a.click();
-                                URL.revokeObjectURL(url);
-                              }}
-                              className="flex items-center gap-1 bg-white border border-amber-300 hover:bg-amber-50 text-amber-700 px-3 py-1.5 rounded-lg text-xs font-medium transition-all"
-                            >
-                              📥 エクスポート
-                            </button>
-                            <label className="flex items-center gap-1 bg-white border border-amber-300 hover:bg-amber-50 text-amber-700 px-3 py-1.5 rounded-lg text-xs font-medium transition-all cursor-pointer">
-                              📤 インポート
-                              <input
-                                type="file"
-                                accept=".json"
-                                className="hidden"
-                                onChange={(e) => {
-                                  const file = e.target.files?.[0];
-                                  if (!file) return;
-                                  const reader = new FileReader();
-                                  reader.onload = (event) => {
-                                    try {
-                                      const data = JSON.parse(event.target.result);
-                                      if (data.history) {
-                                        localStorage.setItem('portfolio_history', JSON.stringify(data.history));
-                                        setHistory(data.history);
-                                      }
-                                      if (data.profile) {
-                                        localStorage.setItem('investor_profile', JSON.stringify(data.profile));
-                                        setProfile(data.profile);
-                                      }
-                                      alert(`インポート完了！\n履歴: ${data.history?.length || 0}件`);
-                                    } catch (err) {
-                                      alert('ファイルの読み込みに失敗しました');
-                                    }
-                                  };
-                                  reader.readAsText(file);
-                                  e.target.value = '';
-                                }}
-                              />
-                            </label>
-                          </div>
+                      <div className="grid md:grid-cols-2 gap-4">
+                        {/* 保存 */}
+                        <div className="bg-white rounded-xl p-4 border border-slate-200">
+                          <h4 className="font-medium text-slate-700 mb-2">📥 今日のデータを保存</h4>
+                          <p className="text-xs text-slate-500 mb-3">CSVを読み込んだ後、JSONファイルとして保存できます</p>
+                          <button
+                            onClick={saveDataToFile}
+                            disabled={!hasData}
+                            className={`w-full flex items-center justify-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-all ${hasData ? 'bg-gradient-to-r from-blue-600 to-indigo-600 text-white hover:from-blue-700 hover:to-indigo-700 shadow-lg shadow-blue-500/25' : 'bg-slate-200 text-slate-400 cursor-not-allowed'}`}
+                          >
+                            💾 保存してダウンロード
+                          </button>
+                        </div>
+                        
+                        {/* 読み込み */}
+                        <div className="bg-white rounded-xl p-4 border border-slate-200">
+                          <h4 className="font-medium text-slate-700 mb-2">📂 過去のデータを読み込み</h4>
+                          <p className="text-xs text-slate-500 mb-3">保存したJSONファイルを選択（複数可）</p>
+                          <label className="w-full flex items-center justify-center gap-2 px-4 py-2 rounded-lg text-sm font-medium bg-white border-2 border-dashed border-slate-300 hover:border-blue-400 hover:bg-blue-50 text-slate-600 cursor-pointer transition-all">
+                            📁 ファイルを選択
+                            <input
+                              type="file"
+                              accept=".json"
+                              multiple
+                              className="hidden"
+                              onChange={(e) => loadHistoryFiles(e.target.files)}
+                            />
+                          </label>
                         </div>
                       </div>
+                      
+                      {/* 履歴情報 */}
+                      {history.length > 0 && (
+                        <div className="mt-4 pt-4 border-t border-blue-200">
+                          <p className="text-sm text-slate-600">📊 {history.length}日分の履歴があります</p>
+                          {viewMode === 'history' && selectedHistoryDate && (
+                            <p className="text-xs text-blue-600 mt-1">📅 {selectedHistoryDate} のデータを表示中</p>
+                          )}
+                        </div>
+                      )}
                     </div>
 
                     {usStocks.length > 0 && (
@@ -1235,7 +1427,7 @@ ${adviceRequest}
 
           <footer className="bg-white border-t border-slate-200 mt-8">
             <div className="max-w-6xl mx-auto px-4 py-4 text-center text-xs text-slate-500">
-              <p>楽天証券対応 資産管理＆決算カレンダー v3.0.0</p>
+              <p>楽天証券対応 資産管理＆決算カレンダー v4.0.0</p>
               <p className="mt-1">🔒 すべてのデータはブラウザ内で処理されます（サーバー送信なし）</p>
             </div>
           </footer>
