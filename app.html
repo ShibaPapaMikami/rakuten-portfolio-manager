@@ -111,7 +111,8 @@
       if (text.includes('ティッカー') && text.includes('USドル')) return 'US';
       if (text.includes('銘柄コード') && !text.includes('ファンド')) return 'JP';
       if (text.includes('ファンド') || text.includes('投資信託')) return 'FUND';
-      if (text.includes('通貨') && text.includes('残高［現地通貨］') && text.includes('残高［円］')) return 'FOREIGN_CASH';
+      // 外貨預り金CSV検出（「参考為替レート」は外貨CSVのみに存在）
+      if (text.includes('参考為替レート') && text.includes('残高') && !text.includes('ティッカー')) return 'FOREIGN_CASH';
       return 'UNKNOWN';
     }
 
@@ -1093,7 +1094,7 @@ ${adviceRequest}
                   </div>
                   <div>
                     <h1 className="text-lg font-bold text-slate-800">楽天証券 資産管理＆決算カレンダー</h1>
-                    <p className="text-xs text-slate-500">米国株・日本株・投資信託を統合管理</p>
+                    <p className="text-xs text-slate-500">米国株・日本株・投資信託・外貨を統合管理</p>
                   </div>
                 </div>
                 
@@ -1151,7 +1152,7 @@ ${adviceRequest}
                   <div className="text-4xl">📁</div>
                   <div className="text-left">
                     <p className="font-medium text-slate-700">CSVをドラッグ&ドロップ（複数可）</p>
-                    <p className="text-xs text-slate-500">またはクリックしてファイルを選択 - 米国株・日本株・投資信託のCSVを自動判別</p>
+                    <p className="text-xs text-slate-500">またはクリックしてファイルを選択 - 米国株・日本株・投資信託・外貨のCSVを自動判別</p>
                   </div>
                 </div>
                 <input type="file" accept=".csv" multiple onChange={handleDrop} className="hidden" id="csv-input" />
@@ -1613,7 +1614,7 @@ ${adviceRequest}
                 <h3 className="font-bold text-slate-800 mb-4">📖 使い方</h3>
                 <ol className="space-y-3 text-sm text-slate-600">
                   <li className="flex gap-3"><span className="flex-shrink-0 w-6 h-6 bg-blue-100 text-blue-600 rounded-full flex items-center justify-center text-xs font-bold">1</span><span>楽天証券にログイン → 「保有商品一覧」を開く</span></li>
-                  <li className="flex gap-3"><span className="flex-shrink-0 w-6 h-6 bg-blue-100 text-blue-600 rounded-full flex items-center justify-center text-xs font-bold">2</span><span>「米国株式」「日本株式」「投資信託」それぞれで「CSV保存」</span></li>
+                  <li className="flex gap-3"><span className="flex-shrink-0 w-6 h-6 bg-blue-100 text-blue-600 rounded-full flex items-center justify-center text-xs font-bold">2</span><span>「米国株式」「日本株式」「投資信託」「外貨預り金」それぞれで「CSV保存」</span></li>
                   <li className="flex gap-3"><span className="flex-shrink-0 w-6 h-6 bg-blue-100 text-blue-600 rounded-full flex items-center justify-center text-xs font-bold">3</span><span>ダウンロードしたCSVをまとめて上のエリアにドラッグ&ドロップ</span></li>
                   <li className="flex gap-3"><span className="flex-shrink-0 w-6 h-6 bg-blue-100 text-blue-600 rounded-full flex items-center justify-center text-xs font-bold">4</span><span>次回アクセス時は自動でデータが復元されます</span></li>
                 </ol>
@@ -1629,7 +1630,7 @@ ${adviceRequest}
 
           <footer className="bg-white border-t border-slate-200 mt-8">
             <div className="max-w-6xl mx-auto px-4 py-4 text-center text-xs text-slate-500">
-              <p>楽天証券対応 資産管理＆決算カレンダー v5.1.0</p>
+              <p>楽天証券対応 資産管理＆決算カレンダー v5.1.1</p>
               <p className="mt-1">🔒 すべてのデータはブラウザ内で処理されます（サーバー送信なし）</p>
             </div>
           </footer>
