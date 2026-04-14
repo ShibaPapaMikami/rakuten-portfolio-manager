@@ -762,7 +762,21 @@ END:VCALENDAR`;
           switchUser('default');
         }
       };
-      
+
+      // 履歴エントリー削除
+      const deleteHistoryEntry = (date) => {
+        if (!confirm(`${date} の履歴を削除しますか？`)) return;
+        const newHistory = history.filter(h => h.date !== date);
+        setHistory(newHistory);
+        // localStorageも更新
+        const savedData = localStorage.getItem(`portfolio_data_${currentUser}`);
+        if (savedData) {
+          const data = JSON.parse(savedData);
+          data.history = newHistory;
+          localStorage.setItem(`portfolio_data_${currentUser}`, JSON.stringify(data));
+        }
+      };
+
       const saveProfile = () => {
         localStorage.setItem(`investor_profile_${currentUser}`, JSON.stringify(profile));
         alert('プロファイルを保存しました！');
@@ -1500,7 +1514,16 @@ ${adviceRequest}
                           {history.slice().reverse().slice(0, 10).map((h, i) => (
                             <div key={i} className="flex items-center justify-between p-3 bg-slate-50 rounded-lg">
                               <span className="text-sm text-slate-600">{h.date}</span>
-                              <span className="font-medium text-slate-800">¥{Math.round(h.totalValueJPY).toLocaleString()}</span>
+                              <div className="flex items-center gap-3">
+                                <span className="font-medium text-slate-800">¥{Math.round(h.totalValueJPY).toLocaleString()}</span>
+                                <button
+                                  onClick={() => deleteHistoryEntry(h.date)}
+                                  className="text-red-400 hover:text-red-600 text-sm"
+                                  title="この履歴を削除"
+                                >
+                                  ✕
+                                </button>
+                              </div>
                             </div>
                           ))}
                         </div>
@@ -1775,7 +1798,7 @@ ${adviceRequest}
 
           <footer className="bg-white border-t border-slate-200 mt-8">
             <div className="max-w-6xl mx-auto px-4 py-4 text-center text-xs text-slate-500">
-              <p>楽天証券対応 資産管理＆決算カレンダー v6.1.0</p>
+              <p>楽天証券対応 資産管理＆決算カレンダー v6.2.0</p>
               <p className="mt-1">🔒 すべてのデータはブラウザ内で処理されます（サーバー送信なし）</p>
             </div>
           </footer>
